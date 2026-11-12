@@ -518,8 +518,8 @@ function syncInput(){
 $("#url").addEventListener("input", syncInput);
 $("#url").addEventListener("keydown", e => { if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); analyze(); }});
 $("#pasteBtn").onclick = async () => {
-  let t=""; try{ t = await navigator.clipboard.readText(); }catch{}
-  if(!t) t = await api.paste();
+  // appunti letti da Python: navigator.clipboard farebbe comparire la richiesta di permesso del browser
+  const t = await api.paste();
   if(t){ $("#url").value=t.trim(); syncInput(); analyze(); }
 };
 $("#analyzeBtn").onclick = analyze;
