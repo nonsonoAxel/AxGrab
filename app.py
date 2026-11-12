@@ -4,11 +4,13 @@ Creato da nonsonoAxel · https://github.com/nonsonoAxel/AxGrab
 
 Avvio in sviluppo:  python app.py      Build:  crea-exe.bat
 """
+import base64
 import ctypes
 import ctypes.wintypes as wt
 import hashlib
 import json
 import logging
+import logging.handlers
 import os
 import re
 import shutil
@@ -25,31 +27,50 @@ from pathlib import Path
 
 import webview
 
+import firma
+
 APP_NAME = "AxGrab"
-APP_VERSION = "1.0.2"            # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.0.3"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxGrab"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
+# Chiave pubblica con cui si controlla la firma degli aggiornamenti (vedi firma.py). Quella
+# privata sta solo sul PC di chi pubblica le release: senza, nessuno può far installare un EXE
+# all'aggiornamento automatico, nemmeno entrando nell'account GitHub.
+RELEASE_PUBLIC_KEY = "daf5738d9a6c0c96264d5336103ea44574e96f20a442afdc60c55365f32c3a14"
 _LOCAL = Path(os.environ.get("LOCALAPPDATA", Path.home()))
 DATA_DIR = _LOCAL / APP_NAME
 
 
+# programmi di Windows sempre con il percorso completo: chiamati solo per nome, Windows li
+# cercherebbe prima nella cartella dell'EXE (es. Download), dove chiunque può metterne uno finto
+_WINDIR = os.environ.get("SystemRoot") or r"C:\Windows"
+POWERSHELL = os.path.join(_WINDIR, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+TASKKILL = os.path.join(_WINDIR, "System32", "taskkill.exe")
+EXPLORER = os.path.join(_WINDIR, "explorer.exe")
+
+
 def _migrate_old_data():
-    """Porta i dati dal vecchio nome (Grabby): per ogni file tiene la versione più recente."""
+    """Porta impostazioni e cronologia dal vecchio nome (Grabby). Solo se la cartella è davvero
+    della vecchia app (contiene grabby.log) e senza toccare file che non le appartengono:
+    i programmi in bin non si copiano, vengono riscaricati."""
     old = _LOCAL / "Grabby"
-    if not old.is_dir():
-        return
     try:
+        if not old.is_dir() or old.is_symlink() or old.is_junction() or not (old / "grabby.log").is_file():
+            return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        for item in old.rglob("*"):
-            if item.is_dir():
-                continue
-            rel = item.relative_to(old)
-            target = DATA_DIR / ("axgrab.log" if rel.name == "grabby.log" else rel)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            if not target.exists() or item.stat().st_mtime > target.stat().st_mtime:
+        for name in ("settings.json", "history.json"):
+            item, target = old / name, DATA_DIR / name
+            if item.is_file() and not target.exists():
                 os.replace(item, target)
-        shutil.rmtree(old, ignore_errors=True)
+        for name in ("settings.json", "history.json", "grabby.log", "cookies.txt", "cookies.json",
+                     "siti-con-cookie.json"):
+            (old / name).unlink(missing_ok=True)
+        for name in ("bin", "cache"):
+            sub = old / name
+            if sub.is_dir() and not sub.is_symlink() and not sub.is_junction():
+                shutil.rmtree(sub, ignore_errors=True)
+        old.rmdir()                # riesce solo se non è rimasto nient'altro
     except OSError:
         pass
 
@@ -63,6 +84,11 @@ CACHE_DIR = DATA_DIR / "cache"
 # yt-dlp "a cartella": non deve estrarsi in una cartella temporanea a ogni avvio (analisi più rapida)
 YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_win.zip"
 YTDLP_LATEST = "https://github.com/yt-dlp/yt-dlp/releases/latest"
+# impronte SHA-256 pubblicate accanto agli zip: servono a scartare un download rovinato
+YTDLP_SUMS = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
+FFMPEG_SUMS = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/checksums.sha256"
+DENO_SUMS = ("https://github.com/denoland/deno/releases/latest/download/"
+             "deno-x86_64-pc-windows-msvc.zip.sha256sum")
 # ffmpeg "shared": ffmpeg e ffprobe condividono le stesse librerie (~100 MB invece di ~390 MB)
 FFMPEG_URL = ("https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/"
               "ffmpeg-master-latest-win64-gpl-shared.zip")
@@ -75,13 +101,19 @@ OWN_EXE = {"yt-dlp": YTDLP_DIR / "yt-dlp.exe", "ffmpeg": FFMPEG_DIR / "ffmpeg.ex
 LEGACY_FILES = ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe")   # versioni a file singolo, più pesanti
 
 # copia dei cookie dei soli siti video: evita di rileggere (e decifrare) il browser a ogni
-# analisi e permette di usarli anche quando un browser Chromium è aperto e blocca il suo file
-COOKIE_FILE = DATA_DIR / "cookies.txt"
+# analisi e permette di usarli anche quando un browser Chromium è aperto e blocca il suo file.
+# Sul disco è cifrata con DPAPI (la chiave è legata all'utente di Windows): non è leggibile
+# copiando il file su un altro PC o da un altro utente.
+COOKIE_FILE = DATA_DIR / "cookies.bin"
+COOKIE_FILE_OLD = DATA_DIR / "cookies.txt"     # versioni fino alla 1.0.2: in chiaro, va eliminata
 COOKIE_META = DATA_DIR / "cookies.json"
 COOKIE_MAX_AGE = 30 * 60      # dopo 30 minuti si prova a rileggerli dal browser
+COOKIE_KEEP = 7 * 24 * 3600   # una copia più vecchia di 7 giorni viene eliminata
 NEEDS_COOKIES_FILE = DATA_DIR / "siti-con-cookie.json"
 NEEDS_COOKIES_FOR = 12 * 3600  # un sito che ha chiesto i cookie li riceve subito per 12 ore
-COOKIE_DOMAINS = ("youtube.com", "youtu.be", "google.com", "googlevideo.com", "instagram.com",
+# niente google.com: quei cookie sono la sessione di tutto l'account Google (posta, Drive…),
+# a YouTube bastano quelli di youtube.com
+COOKIE_DOMAINS = ("youtube.com", "youtu.be", "googlevideo.com", "instagram.com",
                   "facebook.com", "fb.watch", "threads.net", "tiktok.com", "x.com", "twitter.com",
                   "twitch.tv", "reddit.com", "vimeo.com", "soundcloud.com", "dailymotion.com",
                   "bilibili.com", "patreon.com", "pinterest.com", "linkedin.com", "snapchat.com")
@@ -95,7 +127,11 @@ AUTH_ERRORS = ("sign in", "log in", "login", "logged-in", "cookies", "private", 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-logging.basicConfig(filename=DATA_DIR / "axgrab.log", level=logging.INFO, encoding="utf-8",
+LOG_FILE = DATA_DIR / "axgrab.log"
+# il log non cresce all'infinito: al massimo ~500 KB più una copia precedente
+_log_handler = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=512_000, backupCount=1,
+                                                    encoding="utf-8")
+logging.basicConfig(handlers=[_log_handler], level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(APP_NAME)
 
@@ -108,7 +144,61 @@ DEFAULT_SETTINGS = {
     "cookie_when": "auto",    # auto (solo quando servono) | always
     "playlist": False,
     "parallel": 2,
+    "skip_version": "",       # aggiornamento rimandato con "Più tardi"
 }
+# valori ammessi: tutto il resto (da settings.json o dall'interfaccia) viene scartato
+ALLOWED_SETTINGS = {
+    "mode": ("video", "audio"),
+    "quality": ("best", "2160", "1440", "1080", "720", "480"),
+    "audio_format": ("mp3", "m4a"),
+    "cookies": ("none", "firefox", "zen", "helium", "chrome", "edge", "brave"),
+    "cookie_when": ("auto", "always"),
+    "parallel": (1, 2, 3, 4),
+}
+URL_RE = re.compile(r"https?://[^\s\"<>]+\Z", re.I)
+# "Apri" avvia solo file di questo tipo, mai programmi o script
+MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v", ".3gp", ".gif",
+             ".m4a", ".mp3", ".opus", ".ogg", ".oga", ".flac", ".wav", ".aac", ".weba", ".mka"}
+
+
+def valid_url(url) -> bool:
+    return isinstance(url, str) and len(url) < 4000 and bool(URL_RE.match(url))
+
+
+def url_host(url) -> str:
+    """Solo il sito, per il log: i link completi possono contenere dati privati."""
+    try:
+        return urllib.parse.urlsplit(url).netloc.lower() or "?"
+    except (ValueError, AttributeError):
+        return "?"
+
+
+def log_safe(text) -> str:
+    """Messaggio d'errore per il log senza link né codice del video: resta solo il sito."""
+    text = re.sub(r"https?://[^\s'\"]+", lambda m: url_host(m.group()), text or "")
+    return re.sub(r"\[([\w:+.-]+)\] [^\s:]+:", r"[\1]", text)[:200]
+
+
+def clean_settings(data) -> dict:
+    """Tiene solo le impostazioni conosciute e con un valore valido."""
+    out = {}
+    if not isinstance(data, dict):
+        return out
+    for key, allowed in ALLOWED_SETTINGS.items():
+        v = data.get(key)
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        if type(v) in (str, int) and v in allowed:
+            out[key] = v
+    if isinstance(data.get("playlist"), bool):
+        out["playlist"] = data["playlist"]
+    folder = data.get("folder")
+    if isinstance(folder, str) and 0 < len(folder) < 1000 and os.path.isabs(folder):
+        out["folder"] = folder
+    skip = data.get("skip_version")
+    if isinstance(skip, str) and re.fullmatch(r"[0-9A-Za-z.\-]{0,30}", skip):
+        out["skip_version"] = skip
+    return out
 
 
 def resource_path(rel: str) -> str:
@@ -118,10 +208,37 @@ def resource_path(rel: str) -> str:
 
 
 def load_json(path: Path, default):
+    """Un file mancante, rovinato o del tipo sbagliato (lista al posto di oggetto…) vale come vuoto."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return default
+    return data if isinstance(data, type(default)) else default
+
+
+class _DataBlob(ctypes.Structure):
+    _fields_ = [("cbData", wt.DWORD), ("pbData", ctypes.c_void_p)]
+
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    """Cifra/decifra con DPAPI di Windows: la chiave è dell'utente che ha fatto l'accesso."""
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    fn.argtypes = [ctypes.POINTER(_DataBlob), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                   ctypes.c_void_p, wt.DWORD, ctypes.POINTER(_DataBlob)]
+    fn.restype = wt.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    buf = ctypes.create_string_buffer(data, len(data))
+    src = _DataBlob(len(data), ctypes.cast(buf, ctypes.c_void_p))
+    out = _DataBlob()
+    if not fn(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(out)):   # 0x1: nessuna finestra
+        raise OSError("DPAPI non riuscita")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        kernel32.LocalFree(out.pbData)
 
 
 def save_json(path: Path, data):
@@ -187,7 +304,7 @@ def version_tuple(v: str):
     """'1.10.2' -> (1, 10, 2): confronto corretto anche con numeri a più cifre."""
     out = []
     for part in (v or "0").split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
+        digits = "".join(ch for ch in part if ch in "0123456789")[:9]
         out.append(int(digits) if digits else 0)
     return tuple(out + [0] * (3 - len(out)))
 
@@ -215,20 +332,32 @@ class Api:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         BIN_DIR.mkdir(parents=True, exist_ok=True)
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        for old in CACHE_DIR.glob("*.json"):     # analisi rimaste da sessioni precedenti
-            old.unlink(missing_ok=True)
+        # analisi e cookie temporanei rimasti da sessioni precedenti (chiusura improvvisa, crash):
+        # i file ck-*.txt possono contenere i cookie di tutto il browser, non devono restare
+        for old in [*CACHE_DIR.glob("*.json"), *CACHE_DIR.glob("ck-*.txt")]:
+            try:
+                old.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            COOKIE_FILE_OLD.unlink(missing_ok=True)     # vecchia copia in chiaro
+        except OSError:
+            pass
         self._info_cache = {}
         self._cookie_reads = set()      # file temporanei in cui yt-dlp sta leggendo dal browser
-        self._needs_cookies = load_json(NEEDS_COOKIES_FILE, {})
+        self._procs = set()             # yt-dlp in esecuzione: vanno fermati alla chiusura
+        self._needs_cookies = {k: v for k, v in load_json(NEEDS_COOKIES_FILE, {}).items()
+                               if isinstance(v, (int, float))}
         self._window = None
         self._hwnd = 0
         self._maximized = False
         self._restore_rect = None
-        self.settings = {**DEFAULT_SETTINGS, **load_json(SETTINGS_FILE, {})}
-        self.history = load_json(HISTORY_FILE, [])
+        self.settings = {**DEFAULT_SETTINGS, **clean_settings(load_json(SETTINGS_FILE, {}))}
+        self.history = [h for h in load_json(HISTORY_FILE, []) if isinstance(h, dict)][:300]
         self._jobs = {}
         self._lock = threading.Lock()
-        self._slots = threading.Semaphore(max(1, int(self.settings["parallel"])))
+        self._slots = threading.Semaphore(self.settings["parallel"])
+        self._expire_cookies()
 
     # ---------- utilità ----------
     def _emit(self, event: str, payload):
@@ -240,11 +369,67 @@ class Api:
                 pass
 
     def _exe(self, name):
-        """Componente installato dall'app; in mancanza, vecchia installazione o quello di sistema."""
-        for p in (OWN_EXE[name], BIN_DIR / f"{name}.exe"):
-            if p.exists():
-                return str(p)
-        return shutil.which(name)
+        """Solo il componente installato dall'app: mai uno con lo stesso nome trovato nella
+        cartella corrente o nel PATH, che potrebbe non essere quello vero."""
+        p = OWN_EXE[name]
+        return str(p) if p.exists() else None
+
+    @staticmethod
+    def _kill(proc):
+        """Ferma un processo e i suoi figli (yt-dlp avvia ffmpeg e deno)."""
+        try:
+            if proc and proc.poll() is None:
+                subprocess.run([TASKKILL, "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True, creationflags=NO_WINDOW, timeout=15)
+        except Exception:
+            pass
+
+    def _shutdown(self):
+        """Alla chiusura della finestra: nessun yt-dlp deve restare attivo in background (alla
+        fine scriverebbe un file di cookie che nessuno cancella più)."""
+        for j in list(self._jobs.values()):
+            j["cancel"] = True
+        procs = list(self._procs) + [j.get("proc") for j in list(self._jobs.values())]
+        for proc in procs:
+            self._kill(proc)
+        for proc in procs:
+            try:
+                if proc:
+                    proc.wait(timeout=3)
+            except Exception:
+                pass
+        for f in CACHE_DIR.glob("ck-*.txt"):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _fetch_text(url, limit=1_000_000):
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read(limit)
+        if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            return raw.decode("utf-16", errors="replace")
+        return raw.decode("utf-8", errors="replace")
+
+    def _expected_sha256(self, sums_url, filename):
+        """Impronta pubblicata per filename, o None se non si riesce a leggerla."""
+        try:
+            text = self._fetch_text(sums_url)
+        except Exception:
+            log.warning("impronte non scaricabili: %s", sums_url)
+            return None
+        lines = [l for l in text.splitlines() if l.strip()]
+        for line in lines:          # formato "impronta  nome-del-file"
+            parts = line.split()
+            if len(parts) >= 2 and parts[-1].lstrip("*") == filename and re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+                return parts[0].lower()
+        found = re.findall(r"\b[0-9a-fA-F]{64}\b", text)     # file con una sola impronta (Deno)
+        if len(found) == 1 and not any(len(l.split()) == 2 for l in lines):
+            return found[0].lower()
+        log.warning("impronta di %s non trovata in %s", filename, sums_url)
+        return None
 
     def _download_file(self, url, dest: Path, label, event="setup"):
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -269,21 +454,35 @@ class Api:
         log.info("check_deps: %s", have)
         return {"ytdlp": have["yt-dlp"], "ffmpeg": have["ffmpeg"], "deno": have["deno"]}
 
-    def _install_zip(self, url, label, dest: Path, keep):
+    def _install_zip(self, url, label, dest: Path, keep, sums_url=None):
         """Scarica uno zip ed estrae in dest i file per cui keep(percorso_nello_zip) restituisce
-        il percorso relativo di destinazione (o None per scartarlo). Sostituisce dest solo a fine lavoro."""
+        il percorso relativo di destinazione (o None per scartarlo). Sostituisce dest solo a fine lavoro.
+        Se sums_url è indicato, lo zip deve corrispondere all'impronta SHA-256 pubblicata lì."""
         zpath = BIN_DIR / f"{dest.name}.zip"
         self._download_file(url, zpath, label)
+        if sums_url:
+            expected = self._expected_sha256(sums_url, url.rsplit("/", 1)[-1])
+            if expected:
+                h = hashlib.sha256()
+                with open(zpath, "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(chunk)
+                if h.hexdigest() != expected:
+                    zpath.unlink(missing_ok=True)
+                    raise ValueError(f"{label}: il file scaricato è rovinato o non è quello pubblicato. Riprova.")
         self._emit("setup", {"label": f"Estrazione {label}", "done": 1, "total": 1})
         tmp = dest.with_name(dest.name + ".new")
         shutil.rmtree(tmp, ignore_errors=True)
+        root = tmp.resolve()
         with zipfile.ZipFile(zpath) as z:
             for m in z.infolist():
                 if m.is_dir():
                     continue
                 rel = keep(m.filename)
                 if rel:
-                    out = tmp / rel
+                    out = (tmp / rel).resolve()
+                    if not out.is_relative_to(root):      # es. "_internal/../../altro": fuori dalla cartella
+                        raise ValueError(f"{label}: percorso non valido nello zip ({m.filename})")
                     out.parent.mkdir(parents=True, exist_ok=True)
                     with z.open(m) as src, open(out, "wb") as dst:
                         shutil.copyfileobj(src, dst)
@@ -317,12 +516,13 @@ class Api:
         try:
             t0 = time.time()
             if not OWN_EXE["yt-dlp"].exists():
-                self._install_zip(YTDLP_URL, "yt-dlp", YTDLP_DIR, self._keep_ytdlp)
+                self._install_zip(YTDLP_URL, "yt-dlp", YTDLP_DIR, self._keep_ytdlp, YTDLP_SUMS)
             if not OWN_EXE["ffmpeg"].exists():
-                self._install_zip(FFMPEG_URL, "ffmpeg", FFMPEG_DIR, self._keep_ffmpeg)
+                self._install_zip(FFMPEG_URL, "ffmpeg", FFMPEG_DIR, self._keep_ffmpeg, FFMPEG_SUMS)
             if not OWN_EXE["deno"].exists():
                 self._install_zip(DENO_URL, "Deno", BIN_DIR / "deno-dir",
-                                  lambda n: "deno.exe" if n.endswith("deno.exe") else None)
+                                  lambda n: "deno.exe" if n.replace("\\", "/").split("/")[-1] == "deno.exe" else None,
+                                  DENO_SUMS)
                 os.replace(BIN_DIR / "deno-dir" / "deno.exe", OWN_EXE["deno"])
                 shutil.rmtree(BIN_DIR / "deno-dir", ignore_errors=True)
             # versioni precedenti, più pesanti: non servono più
@@ -345,7 +545,7 @@ class Api:
             current = self.version()
             if current and current == latest:
                 return {"ok": True, "message": f"yt-dlp è già aggiornato ({current})"}
-            self._install_zip(YTDLP_URL, "yt-dlp", YTDLP_DIR, self._keep_ytdlp)
+            self._install_zip(YTDLP_URL, "yt-dlp", YTDLP_DIR, self._keep_ytdlp, YTDLP_SUMS)
             return {"ok": True, "message": f"yt-dlp aggiornato: {current or '—'} → {self.version()}"}
         except Exception as e:
             log.exception("update_ytdlp fallito")
@@ -366,13 +566,14 @@ class Api:
         return self.settings
 
     def save_settings(self, data):
+        data = clean_settings(data)     # solo chiavi conosciute con valori ammessi
         old_parallel = self.settings.get("parallel")
         if "cookies" in data and data["cookies"] != self.settings.get("cookies"):
             self.forget_cookies()       # cambiato browser: la copia salvata non vale più
-        self.settings.update({k: v for k, v in data.items() if k in DEFAULT_SETTINGS})
+        self.settings.update(data)
         save_json(SETTINGS_FILE, self.settings)
         if self.settings["parallel"] != old_parallel:
-            self._slots = threading.Semaphore(max(1, int(self.settings["parallel"])))
+            self._slots = threading.Semaphore(self.settings["parallel"])
         return self.settings
 
     def choose_folder(self):
@@ -386,7 +587,7 @@ class Api:
 
     def paste(self):
         try:
-            p = subprocess.run(["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+            p = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"],
                                capture_output=True, text=True, encoding="utf-8",
                                errors="replace", creationflags=NO_WINDOW, timeout=10)
             return p.stdout.strip()
@@ -406,10 +607,9 @@ class Api:
             args += ["--js-runtimes", f"deno:{deno}"]
         if cookies and cookie_tmp:
             # yt-dlp legge e alla fine riscrive i cookie in un file temporaneo per questa esecuzione
-            if cookies == "saved" or self._saved_cookies_fresh() or (
-                    self._browser_locked() and COOKIE_FILE.exists()):
-                shutil.copyfile(COOKIE_FILE, cookie_tmp)
-            else:
+            use_saved = cookies == "saved" or self._saved_cookies_fresh() or (
+                self._browser_locked() and COOKIE_FILE.exists())
+            if not (use_saved and self._restore_cookies(cookie_tmp)):
                 spec = self._cookie_spec()
                 if spec:
                     args += ["--cookies-from-browser", spec]
@@ -418,10 +618,32 @@ class Api:
         return args
 
     # ---------- copia salvata dei cookie ----------
+    def _cookie_age(self):
+        """Secondi dall'ultima lettura dal browser della copia salvata (None se non si sa)."""
+        read_at = load_json(COOKIE_META, {}).get("read_at")
+        return time.time() - read_at if isinstance(read_at, (int, float)) else None
+
+    def _expire_cookies(self):
+        """Una copia vecchia, o di cui non si conosce l'età, non resta sul disco."""
+        if COOKIE_FILE.exists():
+            age = self._cookie_age()
+            if age is None or not 0 <= age < COOKIE_KEEP:
+                self.forget_cookies()
+
+    def _restore_cookies(self, tmp: Path) -> bool:
+        """Decifra la copia salvata nel file temporaneo per yt-dlp. False se non è utilizzabile."""
+        self._expire_cookies()
+        try:
+            tmp.write_bytes(_dpapi(COOKIE_FILE.read_bytes(), False))
+            return True
+        except OSError:
+            self.forget_cookies()       # illeggibile (es. copiata da un altro PC): si riparte dal browser
+            return False
+
     def _saved_cookies_fresh(self):
-        meta = load_json(COOKIE_META, {})
-        return (COOKIE_FILE.exists() and meta.get("browser") == self.settings["cookies"]
-                and time.time() - meta.get("read_at", 0) < COOKIE_MAX_AGE)
+        age = self._cookie_age()
+        return (COOKIE_FILE.exists() and load_json(COOKIE_META, {}).get("browser") == self.settings["cookies"]
+                and age is not None and 0 <= age < COOKIE_MAX_AGE)
 
     def _browser_locked(self):
         """Helium e gli altri Chromium bloccano il file dei cookie mentre sono aperti."""
@@ -459,18 +681,24 @@ class Api:
                     keep.append(line)
             if len(keep) > 3:
                 with self._lock:
-                    COOKIE_FILE.write_text("\n".join(keep) + "\n", encoding="utf-8")
+                    COOKIE_FILE.write_bytes(_dpapi(("\n".join(keep) + "\n").encode("utf-8"), True))
                     if str(tmp) in self._cookie_reads:   # letti ora dal browser: copia "fresca"
                         save_json(COOKIE_META, {"browser": self.settings["cookies"], "read_at": time.time()})
         except OSError:
             log.exception("salvataggio cookie fallito")
         finally:
             self._cookie_reads.discard(str(tmp))
-            tmp.unlink(missing_ok=True)
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                log.warning("cookie temporanei non eliminati subito: verranno rimossi al prossimo avvio")
 
     def forget_cookies(self):
-        COOKIE_FILE.unlink(missing_ok=True)
-        COOKIE_META.unlink(missing_ok=True)
+        for f in (COOKIE_FILE, COOKIE_FILE_OLD, COOKIE_META):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
         return True
 
     def _cookie_spec(self):
@@ -505,15 +733,18 @@ class Api:
         per un motivo di accesso."""
         if not self._cookie_spec():
             return [False]
-        host = url.lower()
-        if (self.settings.get("cookie_when") == "always" or any(s in host for s in LOGIN_SITES)
+        # si guarda il dominio vero del link, non se il nome del sito compare da qualche parte
+        if (self.settings.get("cookie_when") == "always" or self._site_key(url) in LOGIN_SITES
                 or self._site_needs_cookies(url)):
             return [True, False]
         return [False, True]
 
     # siti che di recente hanno rifiutato le richieste senza cookie
     def _site_key(self, url):
-        host = urllib.parse.urlsplit(url).netloc.lower().split(":")[0]
+        try:
+            host = (urllib.parse.urlsplit(url).hostname or "").lower()
+        except ValueError:
+            host = ""
         host = {"youtu.be": "youtube.com", "fb.watch": "facebook.com", "vm.tiktok.com": "tiktok.com",
                 "twitter.com": "x.com"}.get(host, host)
         return ".".join(host.split(".")[-2:])
@@ -572,51 +803,69 @@ class Api:
         return err.replace("ERROR: ", "")
 
     def get_info(self, url):
+        if not valid_url(url):
+            return {"ok": False, "error": "Questo non è un link valido."}
         exe = self._exe("yt-dlp")
         if not exe:
             return {"ok": False, "error": "yt-dlp non installato"}
         warning = None
         plan = self._cookie_plan(url)
+        site = url_host(url)
         i = 0
         while i < len(plan):
             use_cookies = plan[i]
             tmp = self._new_cookie_tmp() if use_cookies else None
             args = [exe, *self._base_args(use_cookies, tmp), "-J", "--flat-playlist"]
             args.append("--yes-playlist" if self.settings["playlist"] else "--no-playlist")
-            args.append(url)
+            args += ["--", url]       # dopo "--" yt-dlp non legge più opzioni: il link resta un link
             t0 = time.time()
+            proc = None
             try:
-                p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
-                                   errors="replace", creationflags=NO_WINDOW, timeout=90)
-            except subprocess.TimeoutExpired:
-                log.warning("analisi: timeout dopo 90s (cookie=%s) %s", use_cookies, url)
-                return {"ok": False, "error": "L'analisi ha impiegato troppo (oltre 90 secondi). Riprova."}
+                proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                        encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+                self._procs.add(proc)
+                try:
+                    stdout, stderr = proc.communicate(timeout=90)
+                except subprocess.TimeoutExpired:
+                    self._kill(proc)
+                    proc.communicate()
+                    log.warning("analisi: timeout dopo 90s (cookie=%s) %s", use_cookies, site)
+                    return {"ok": False, "error": "L'analisi ha impiegato troppo (oltre 90 secondi). Riprova."}
             finally:
+                self._procs.discard(proc)
                 if tmp:
                     self._store_cookies(tmp)
-            ok = p.returncode == 0 and p.stdout.strip()
-            err = [l for l in p.stderr.splitlines() if "ERROR" in l]
-            err = (err[-1] if err else p.stderr.strip()[-300:]) or "Errore sconosciuto"
-            log.info("analisi %.1fs cookie=%s ok=%s %s%s", time.time() - t0, use_cookies, bool(ok), url,
-                     "" if ok else " | " + err[:200])
+            ok = proc.returncode == 0 and stdout.strip()
+            err = [l for l in stderr.splitlines() if "ERROR" in l]
+            err = (err[-1] if err else stderr.strip()[-300:]) or "Errore sconosciuto"
+            # per decidere se serviva il login si guarda il messaggio senza il link: parole come
+            # "login" o "account" dentro il link stesso non devono far leggere i cookie
+            why = err.replace(url, "")
+            log.info("analisi %.1fs cookie=%s ok=%s %s%s", time.time() - t0, use_cookies, bool(ok), site,
+                     "" if ok else " | " + log_safe(why))
             if ok:
                 break
-            if not use_cookies and is_auth_error(err) and self._cookie_spec():
+            if not use_cookies and is_auth_error(why) and self._cookie_spec():
                 self._remember_needs_cookies(url)     # la prossima volta cookie subito
-            self._extend_plan(plan, i, use_cookies, err)
+            self._extend_plan(plan, i, use_cookies, why)
             nxt = plan[i + 1] if i + 1 < len(plan) else None
-            if nxt is not None and self._should_retry(use_cookies, nxt, err):
+            if nxt is not None and self._should_retry(use_cookies, nxt, why):
                 if use_cookies and not nxt:
-                    warning = self._cookie_warning(err)
+                    warning = self._cookie_warning(why)
                 i += 1
                 continue
             return {"ok": False, "error": self._friendly(err, any(plan[:i + 1])), "detail": err}
-        d = json.loads(p.stdout)
+        try:
+            d = json.loads(stdout)
+        except ValueError:
+            d = None
+        if not isinstance(d, dict):
+            return {"ok": False, "error": "yt-dlp ha dato una risposta che non riesco a leggere."}
         is_pl = d.get("_type") == "playlist"
         if not is_pl:
             # salva l'analisi: il download la riusa e salta 2-3 secondi di estrazione
             path = CACHE_DIR / f"{uuid.uuid4().hex}.json"
-            path.write_text(p.stdout, encoding="utf-8")
+            path.write_text(stdout, encoding="utf-8")
             self._info_cache[url] = (path, time.time(), use_cookies)
         thumb = d.get("thumbnail")
         if not thumb and d.get("thumbnails"):
@@ -651,13 +900,17 @@ class Api:
         return ["-f", "bv*+ba/b", "-S", sort, "--merge-output-format", "mp4", "--embed-metadata"]
 
     def start_download(self, url, info=None, overrides=None):
-        opts = {**self.settings, **(overrides or {})}
+        if not valid_url(url):
+            return None
+        opts = {**self.settings, **clean_settings(overrides)}
+        info = info if isinstance(info, dict) else {}
+        title, thumb, site = info.get("title"), info.get("thumbnail"), info.get("site")
         job_id = uuid.uuid4().hex[:10]
         job = {
             "id": job_id, "url": url, "status": "queued", "percent": 0,
-            "title": (info or {}).get("title") or url,
-            "thumbnail": (info or {}).get("thumbnail"),
-            "site": (info or {}).get("site", ""),
+            "title": title[:300] if isinstance(title, str) and title else url,
+            "thumbnail": thumb if valid_url(thumb) else None,
+            "site": site[:40] if isinstance(site, str) else "",
             "mode": opts["mode"],
             "quality": opts["audio_format"].upper() if opts["mode"] == "audio" else
                        ("Max" if opts["quality"] == "best" else opts["quality"] + "p"),
@@ -683,7 +936,7 @@ class Api:
                 # tentativi: analisi già fatta (con lo stesso uso dei cookie) -> piano dei cookie
                 attempts = ([(cached[1], cached[0])] if cached else [])
                 attempts += [(c, None) for c in self._cookie_plan(job["url"])]
-                code, err = 1, ""
+                code, err, why = 1, "", ""     # why: l'errore senza il link (vedi get_info)
                 t0 = time.time()
                 i = 0
                 while i < len(attempts):
@@ -694,21 +947,22 @@ class Api:
                         prev_cookies, prev_file = attempts[i - 1]
                         # dopo un tentativo dall'analisi salvata si riprova sempre; altrimenti
                         # si segue la regola dei cookie
-                        if not prev_file and not self._should_retry(prev_cookies, cookies, err):
+                        if not prev_file and not self._should_retry(prev_cookies, cookies, why):
                             break
                         if prev_cookies and not cookies:
-                            job["warning"] = self._cookie_warning(err)
+                            job["warning"] = self._cookie_warning(why)
                     job["percent"] = 0
                     ta = time.time()
                     code, err = self._run_proc(job, opts, cookies, info_file)
+                    why = err.replace(job["url"], "")
                     log.info("download tentativo %d (cookie=%s, analisi salvata=%s): codice %s, %.1fs%s",
                              i + 1, cookies, bool(info_file), code, time.time() - ta,
-                             "" if code == 0 else " | " + err[:200])
+                             "" if code == 0 else " | " + log_safe(why))
                     if code == 0:
                         break
-                    if not cookies and is_auth_error(err) and self._cookie_spec():
+                    if not cookies and is_auth_error(why) and self._cookie_spec():
                         self._remember_needs_cookies(job["url"])
-                    if cookies is True and is_cookie_error(err) and COOKIE_FILE.exists() and \
+                    if cookies is True and is_cookie_error(why) and COOKIE_FILE.exists() and \
                             not any(c == "saved" for c, _ in attempts):
                         attempts.insert(i + 1, ("saved", None))
                     i += 1
@@ -716,7 +970,7 @@ class Api:
                     mb = os.path.getsize(job["file"]) / 2**20
                     secs = time.time() - t0
                     log.info("completato %.1f MB in %.1fs (media %.1f MB/s, %s %s) %s", mb, secs,
-                             mb / max(secs, 0.1), opts["mode"], job["quality"], job["url"])
+                             mb / max(secs, 0.1), opts["mode"], job["quality"], url_host(job["url"]))
                 if cached:
                     cached[0].unlink(missing_ok=True)
                 if job["cancel"]:
@@ -744,7 +998,8 @@ class Api:
     def _run_proc(self, job, opts, cookies, info_file=None):
         """Esegue yt-dlp una volta; restituisce (codice di uscita, ultimo errore)."""
         exe = self._exe("yt-dlp")
-        source = ["--load-info-json", str(info_file)] if info_file else [job["url"]]
+        # "--" chiude le opzioni: quello che segue è sempre trattato come link
+        source = ["--load-info-json", str(info_file)] if info_file else ["--", job["url"]]
         tmp = self._new_cookie_tmp() if cookies else None
         try:
             return self._run_proc_inner(job, opts, exe, source, cookies, tmp)
@@ -763,8 +1018,10 @@ class Api:
                 "--progress-template",
                 "download:@@P|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|"
                 "%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s",
-                "--print", "before_dl:@@T|%(title)s|%(playlist_index)s|%(n_entries)s",
-                "--print", "after_move:@@F|%(filepath)s",
+                # titolo e percorso in formato JSON (%(...)j): stanno sempre su una riga sola, così
+                # un titolo con un "a capo" non può fingere una riga di stato
+                "--print", "before_dl:@@T|%(playlist_index)s|%(n_entries)s|%(title)j",
+                "--print", "after_move:@@F|%(filepath)j",
                 *source]
         job["status"] = "downloading"
         self._emit("job", self._public(job))
@@ -774,6 +1031,14 @@ class Api:
                                 text=True, encoding="utf-8", errors="replace",
                                 creationflags=NO_WINDOW, bufsize=1)
         job["proc"] = proc
+
+        def unjson(text):
+            try:
+                v = json.loads(text)
+                return v if isinstance(v, str) else text
+            except ValueError:
+                return text
+
         for line in proc.stdout:
             line = line.rstrip()
             if line.startswith("@@P|"):
@@ -787,8 +1052,8 @@ class Api:
                     last_emit = now
                     self._emit("job", self._public(job))
             elif line.startswith("@@T|"):
-                parts = line.split("|")
-                idx, n, title = parts[-2], parts[-1], "|".join(parts[1:-2])
+                _, idx, n, title = (line.split("|", 3) + [""] * 4)[:4]
+                title = unjson(title)[:300]
                 job["percent"], job["status"] = 0, "downloading"
                 if idx not in ("NA", "None") and n not in ("NA", "None"):
                     job["item"] = f"{idx}/{n}"      # playlist: titolo resta quello della playlist
@@ -797,7 +1062,7 @@ class Api:
                     job["title"] = title
                 self._emit("job", self._public(job))
             elif line.startswith("@@F|"):
-                job["file"] = line[4:]
+                job["file"] = unjson(line[4:])
             elif "[Merger]" in line or "[ExtractAudio]" in line:
                 job["status"] = "processing"
                 self._emit("job", self._public(job))
@@ -813,8 +1078,7 @@ class Api:
         job["cancel"] = True
         proc = job.get("proc")
         if proc and proc.poll() is None:
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                           capture_output=True, creationflags=NO_WINDOW)
+            self._kill(proc)
         elif job["status"] == "queued":
             job["status"] = "cancelled"
             self._emit("job", self._public(job))
@@ -849,20 +1113,42 @@ class Api:
     def clear_history(self):
         self.history = []
         save_json(HISTORY_FILE, self.history)
+        # anche il log racconta cosa è stato scaricato: si svuota insieme alla cronologia
+        _log_handler.acquire()
+        try:
+            if _log_handler.stream:
+                _log_handler.stream.close()
+                _log_handler.stream = None
+            for f in (LOG_FILE, LOG_FILE.with_name(LOG_FILE.name + ".1")):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        finally:
+            _log_handler.release()
         return True
 
     # ---------- file ----------
+    def _is_download(self, path) -> bool:
+        """Il percorso è quello di un file scaricato da AxGrab (in coda o in cronologia)."""
+        if not isinstance(path, str) or not path:
+            return False
+        known = {j.get("file") for j in list(self._jobs.values())} | {h.get("file") for h in self.history}
+        return path in known
+
     def open_file(self, path):
-        if path and os.path.exists(path):
+        # solo file scaricati dall'app e solo audio/video: mai programmi, script o collegamenti
+        if (self._is_download(path) and Path(path).suffix.lower() in MEDIA_EXT
+                and os.path.isfile(path)):
             os.startfile(path)
             return True
         return False
 
     def open_folder(self, path=None, file=None):
-        if file and os.path.exists(file):
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(file)])
+        if self._is_download(file) and os.path.exists(file):
+            subprocess.Popen([EXPLORER, "/select,", os.path.normpath(file)])
         else:
-            target = path or self.settings["folder"]
+            target = path if isinstance(path, str) and path else self.settings["folder"]
             if os.path.isdir(target):
                 os.startfile(target)
         return True
@@ -874,6 +1160,34 @@ class Api:
         except Exception:
             self._hwnd = user32.FindWindowW(None, APP_NAME)
         self._set_corners(rounded=True)
+        self._lock_navigation()
+
+    def _lock_navigation(self):
+        """La finestra deve mostrare solo la pagina dell'app: qualunque altra pagina caricata lì
+        dentro (es. un link trascinato sulla finestra) riceverebbe i comandi di Python."""
+        try:
+            from System import Action
+            form = self._window.native
+            view = form.webview
+
+            def on_navigation(sender, args):
+                try:
+                    home = urllib.parse.urlsplit(self._window.real_url or "")
+                    dest = urllib.parse.urlsplit(str(args.Uri))
+                    if (dest.scheme, dest.netloc) != (home.scheme, home.netloc):
+                        args.Cancel = True
+                        log.warning("navigazione bloccata verso %s", dest.netloc or dest.scheme)
+                except Exception:
+                    args.Cancel = True
+
+            def apply():
+                view.AllowExternalDrop = False        # niente file o link trascinati dentro
+                view.NavigationStarting += on_navigation
+
+            self._nav_handler = on_navigation         # resta in vita finché esiste la finestra
+            form.Invoke(Action(apply))
+        except Exception:
+            log.exception("blocco della navigazione non applicato")
 
     def _set_corners(self, rounded):
         # Windows 11: angoli arrotondati anche senza bordo (ignorato su Windows 10)
@@ -908,7 +1222,7 @@ class Api:
         self._follow_mouse(lambda dx, dy: self._place(x + dx, y + dy, w, h))
 
     def win_resize(self, edge):
-        if not self._hwnd or self._maximized:
+        if not self._hwnd or self._maximized or not isinstance(edge, str):
             return
         x, y, w, h = self._rect()
         scale = user32.GetDpiForWindow(self._hwnd) / 96 if hasattr(user32, "GetDpiForWindow") else 1
@@ -984,14 +1298,21 @@ class Api:
             return {"ok": False, "error": f"GitHub ha risposto {e.code}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
-        latest = (rel.get("tag_name") or "").lstrip("vV")
+        if not isinstance(rel, dict):
+            return {"ok": False, "error": "risposta di GitHub non valida"}
+        latest = str(rel.get("tag_name") or "").lstrip("vV")[:30]
         newer = version_tuple(latest) > version_tuple(APP_VERSION)
-        asset = next((a for a in rel.get("assets") or []
-                      if a.get("name", "").lower().endswith(".exe")), {})
+        assets = rel.get("assets") if isinstance(rel.get("assets"), list) else []
+        asset = next((a for a in assets if isinstance(a, dict)
+                      and str(a.get("name") or "").lower().endswith(".exe")), {})
+        # file di firma: stesso nome dell'EXE più ".sig"
+        sig = next((a for a in assets if isinstance(a, dict) and asset
+                    and a.get("name") == f"{asset.get('name')}.sig"), {})
         log.info("controllo aggiornamenti: attuale %s, ultima %s", APP_VERSION, latest or "—")
         return {"ok": True, "update": newer, "current": APP_VERSION, "latest": latest,
                 "page": rel.get("html_url") or RELEASES_PAGE, "exe": asset.get("browser_download_url"),
                 "size": asset.get("size"), "digest": asset.get("digest"),
+                "sig": sig.get("browser_download_url"),
                 "auto": bool(getattr(sys, "frozen", False) and asset),
                 "notes": (rel.get("body") or "")[:600]}
 
@@ -1008,6 +1329,26 @@ class Api:
                 not url.startswith(f"https://github.com/{GITHUB_REPO}/releases/download/"):
             self.open_url(info.get("page") or RELEASES_PAGE)
             return {"ok": True, "manual": True}
+        # Prima di scaricare: la release deve avere una firma valida, fatta con la chiave di chi
+        # pubblica AxGrab e per questa precisa versione. La firma dice anche quale impronta e
+        # quale dimensione deve avere l'EXE. Se manca o non torna non si installa niente e non si
+        # apre nemmeno la pagina: una release non firmata potrebbe non essere autentica.
+        try:
+            sig_url = info.get("sig") or ""
+            if not sig_url.startswith(f"https://github.com/{GITHUB_REPO}/releases/download/"):
+                raise ValueError("manca la firma")
+            signed_sha, signed_size = firma.check_signature_file(
+                self._fetch_text(sig_url, 4096), RELEASE_PUBLIC_KEY, info["latest"])
+        except urllib.error.HTTPError as e:
+            log.error("aggiornamento rifiutato: firma non scaricabile (%s)", e.code)
+            return {"ok": False, "error": "questa release non ha una firma scaricabile. "
+                                          "Non installarla e avvisa chi ti ha dato AxGrab."}
+        except OSError as e:                 # rete assente o lenta: non è un problema della release
+            return {"ok": False, "error": f"non riesco a scaricare la firma della release ({e}). Riprova più tardi."}
+        except Exception as e:
+            log.error("aggiornamento rifiutato: %s", e)
+            return {"ok": False, "error": f"questa release non è firmata come dovrebbe ({e}). "
+                                          "Non installarla e avvisa chi ti ha dato AxGrab."}
         exe = Path(sys.executable)
         new = exe.with_name(exe.stem + ".new.exe")
         try:
@@ -1019,50 +1360,48 @@ class Api:
             data = new.read_bytes()
             if len(data) < 1_000_000 or data[:2] != b"MZ":
                 raise ValueError("il file scaricato non è un EXE valido")
-            if info.get("size") and len(data) != info["size"]:
-                raise ValueError("download incompleto")
-            dig = info.get("digest") or ""
-            if dig.startswith("sha256:") and hashlib.sha256(data).hexdigest() != dig[7:].lower():
-                raise ValueError("il file scaricato non corrisponde a quello della release")
+            # il file scaricato deve essere esattamente quello firmato
+            if len(data) != signed_size:
+                raise ValueError("download incompleto o file diverso da quello firmato")
+            if hashlib.sha256(data).hexdigest() != signed_sha:
+                raise ValueError("il file scaricato non è quello firmato")
         except Exception as e:
             new.unlink(missing_ok=True)
             log.exception("aggiornamento non riuscito")
             return {"ok": False, "error": str(e)}
 
-        q = lambda s: "'" + str(s).replace("'", "''") + "'"
-        script = "\n".join([
-            f"foreach ($p in @({os.getpid()}, {os.getppid()})) {{",
-            "  while (Get-Process -Id $p -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 300 } }",
-            f"$new = {q(new)}; $exe = {q(exe)}",
-            "for ($i = 0; $i -lt 40; $i++) {",       # l'EXE può restare bloccato qualche istante
-            "  try { Move-Item -LiteralPath $new -Destination $exe -Force -ErrorAction Stop; break }",
-            "  catch { Start-Sleep -Milliseconds 500 } }",
-            "Start-Process -FilePath $exe",
-            "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force",
-        ])
-        path = Path(os.environ.get("TEMP", str(_LOCAL))) / "axgrab-update.ps1"
-        path.write_text(script, encoding="utf-8-sig")
         log.info("aggiornamento %s -> %s: riavvio", APP_VERSION, info["latest"])
-        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(path)]
-        base = NO_WINDOW | 0x00000200
         env = independent_env()          # la nuova AxGrab non deve ereditare lo stato di questa
-        try:
-            subprocess.Popen(cmd, creationflags=base | 0x01000000, close_fds=True, env=env)
-        except OSError:
-            subprocess.Popen(cmd, creationflags=base, close_fds=True, env=env)
+        env.update(AXG_PIDS=f"{os.getpid()},{os.getppid()}", AXG_NEW=str(new), AXG_EXE=str(exe))
+        self._detached_powershell(UPDATE_PS, env)
         threading.Timer(0.5, self._window.destroy).start()
         return {"ok": True, "restarting": True, "version": info["latest"]}
 
+    @staticmethod
+    def _detached_powershell(script, env):
+        """Avvia uno script che sopravvive alla chiusura dell'app. Lo script è un testo fisso
+        passato sulla riga di comando (nessun file .ps1 che qualcuno possa riscrivere) e i
+        percorsi gli arrivano come variabili d'ambiente (nessun problema di apostrofi)."""
+        cmd = [POWERSHELL, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+               "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode("ascii")]
+        base = NO_WINDOW | 0x00000200          # nessuna finestra, gruppo di processi separato
+        try:
+            # esce dal "job" dell'app, così non viene chiuso quando AxGrab termina
+            subprocess.Popen(cmd, creationflags=base | 0x01000000, close_fds=True, env=env)
+        except OSError:
+            subprocess.Popen(cmd, creationflags=base, close_fds=True, env=env)
+
     def open_url(self, url):
-        if isinstance(url, str) and url.startswith("https://github.com/"):
+        # solo le pagine del progetto, non qualunque indirizzo di GitHub
+        home = f"https://github.com/{GITHUB_REPO}"
+        if isinstance(url, str) and (url == home or url.startswith(home + "/")) and valid_url(url):
             os.startfile(url)
             return True
         return False
 
     def open_log(self):
-        logf = DATA_DIR / "axgrab.log"
-        if logf.exists():
-            subprocess.Popen(["explorer", "/select,", str(logf)])
+        if LOG_FILE.exists():
+            subprocess.Popen([EXPLORER, "/select,", str(LOG_FILE)])
         return True
 
     def _diagnostics(self):
@@ -1074,46 +1413,81 @@ class Api:
         if exe:
             t0 = time.time()
             subprocess.run([exe, "--version"], capture_output=True, creationflags=NO_WINDOW, timeout=60)
-            log.info("avvio yt-dlp: %.1fs (%s) | componenti: %.0f MB", time.time() - t0, exe,
+            log.info("avvio yt-dlp: %.1fs | componenti: %.0f MB", time.time() - t0,
                      dir_size(BIN_DIR) / 2**20)
 
     def uninstall(self):
         """Elimina dati in AppData, l'EXE e i suoi collegamenti, dopo la chiusura dell'app."""
+        # la cartella da eliminare deve essere proprio quella dei dati di AxGrab
+        if not DATA_DIR.is_absolute() or DATA_DIR.name != APP_NAME or DATA_DIR.is_symlink() \
+                or DATA_DIR.is_junction():
+            log.error("disinstallazione annullata: cartella dati inattesa (%s)", DATA_DIR)
+            return False
+        # ultima conferma con una finestra di Windows: non basta che la chieda la pagina
+        answer = user32.MessageBoxW(
+            self._hwnd or None,
+            "Disinstallare AxGrab?\n\nVerranno eliminati l'app, i suoi dati e i collegamenti.\n"
+            "I video e gli audio scaricati restano dove sono.",
+            "Disinstalla AxGrab", 0x4 | 0x30 | 0x100)      # Sì/No, avviso, predefinito: No
+        if answer != 6:
+            return False
         for j in list(self._jobs.values()):
             if j["status"] in ("queued", "downloading", "processing"):
                 self.cancel(j["id"])
-        exe = sys.executable if getattr(sys, "frozen", False) else ""
-        q = lambda s: "'" + str(s).replace("'", "''") + "'"
-        script = "\n".join([
-            f"foreach ($p in @({os.getpid()}, {os.getppid()})) {{",
-            "  while (Get-Process -Id $p -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 300 } }",
-            "Start-Sleep -Seconds 1",
-            f"Remove-Item -LiteralPath {q(DATA_DIR)} -Recurse -Force -ErrorAction SilentlyContinue",
-            f"$exe = {q(exe)}",
-            "if ($exe) {",
-            "  Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue",
-            "  $sh = New-Object -ComObject WScript.Shell",
-            "  foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {",
-            "    Get-ChildItem -LiteralPath $d -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {",
-            "      if ($sh.CreateShortcut($_.FullName).TargetPath -ieq $exe) { Remove-Item -LiteralPath $_.FullName -Force } } } }",
-            "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force",
-        ])
-        path = Path(os.environ.get("TEMP", str(_LOCAL))) / "axgrab-uninstall.ps1"
-        path.write_text(script, encoding="utf-8-sig")
+        # collegamenti (giunzioni) dentro la cartella dati: si toglie il collegamento, non ciò a
+        # cui punta. Il PowerShell di Windows altrimenti li seguirebbe cancellando la destinazione.
+        for root, dirs, _ in os.walk(DATA_DIR):
+            for d in list(dirs):
+                p = Path(root) / d
+                if p.is_symlink() or p.is_junction():
+                    dirs.remove(d)
+                    try:
+                        os.rmdir(p)
+                    except OSError:
+                        log.error("disinstallazione annullata: collegamento non rimovibile (%s)", p)
+                        return False
+        frozen = getattr(sys, "frozen", False)
+        env = dict(os.environ)
+        # in sviluppo il processo padre è il terminale: si aspetta solo la chiusura dell'app
+        env.update(AXG_PIDS=f"{os.getpid()},{os.getppid()}" if frozen else str(os.getpid()),
+                   AXG_DATA=str(DATA_DIR), AXG_EXE=sys.executable if frozen else "")
         log.info("disinstallazione avviata")
         logging.shutdown()
-        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(path)]
-        base = NO_WINDOW | 0x00000200          # nessuna finestra, gruppo di processi separato
-        try:
-            # esce dal "job" dell'app, così non viene chiuso quando AxGrab termina
-            subprocess.Popen(cmd, creationflags=base | 0x01000000, close_fds=True)
-        except OSError:
-            subprocess.Popen(cmd, creationflags=base, close_fds=True)
+        self._detached_powershell(UNINSTALL_PS, env)
         threading.Timer(0.3, self._window.destroy).start()
         return True
 
 
+# Script PowerShell eseguiti dopo la chiusura dell'app. Sono testi fissi: i valori che cambiano
+# (processi da aspettare, percorsi) arrivano dalle variabili d'ambiente AXG_*, mai scritti nel testo.
+_PS_WAIT = r'''
+foreach ($p in ($env:AXG_PIDS -split ',')) {
+  while (Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 300 } }
+'''
+UPDATE_PS = _PS_WAIT + r'''
+$new = $env:AXG_NEW; $exe = $env:AXG_EXE
+if ($new -and $exe) {
+  for ($i = 0; $i -lt 40; $i++) {
+    try { Move-Item -LiteralPath $new -Destination $exe -Force -ErrorAction Stop; break }
+    catch { Start-Sleep -Milliseconds 500 } }
+  Start-Process -FilePath $exe }
+'''
+UNINSTALL_PS = _PS_WAIT + r'''
+Start-Sleep -Seconds 1
+$data = $env:AXG_DATA; $exe = $env:AXG_EXE
+if ($data -and (Split-Path -Leaf $data) -eq 'AxGrab') {
+  Remove-Item -LiteralPath $data -Recurse -Force -ErrorAction SilentlyContinue }
+if ($exe) {
+  Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+  $sh = New-Object -ComObject WScript.Shell
+  foreach ($d in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
+    if ($d) {
+      Get-ChildItem -LiteralPath $d -Filter *.lnk -ErrorAction SilentlyContinue | ForEach-Object {
+        if ($sh.CreateShortcut($_.FullName).TargetPath -ieq $exe) { Remove-Item -LiteralPath $_.FullName -Force } } } } }
+'''
+
 user32 = ctypes.windll.user32
+user32.MessageBoxW.argtypes = [wt.HWND, wt.LPCWSTR, wt.LPCWSTR, wt.UINT]
 user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.UINT]
 user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
 user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
@@ -1137,7 +1511,10 @@ def main():
     api._window = window
     window.events.shown += api._on_shown
     threading.Thread(target=lambda: (time.sleep(5), api._diagnostics()), daemon=True).start()
-    webview.start(debug="--debug" in sys.argv)
+    try:
+        webview.start(debug="--debug" in sys.argv)
+    finally:
+        api._shutdown()      # finestra chiusa: ferma i download e toglie i cookie temporanei
 
 
 if __name__ == "__main__":

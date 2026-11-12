@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- limita ciò che la pagina può contattare: solo se stessa, più le miniature (immagini https).
+     'unsafe-inline' e 'unsafe-eval' servono a pywebview per il ponte verso Python -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <title>AxGrab</title>
 <style>
 :root{
@@ -581,7 +584,7 @@ async function analyze(){
     $("#pvThumb").innerHTML = thumbHTML(info.thumbnail, info.duration);
     $("#pvTitle").textContent = info.title;
     $("#pvMeta").innerHTML = [siteHTML(s), info.uploader && esc(info.uploader), info.playlist && `Playlist · ${info.count} video`,
-      info.heights?.[0] && `fino a ${info.heights[0]}p`].filter(Boolean).map(x=>`<span>${x}</span>`).join("");
+      info.heights?.[0] && `fino a ${esc(info.heights[0])}p`].filter(Boolean).map(x=>`<span>${x}</span>`).join("");
     renderOpts(); $("#preview").classList.add("show");
   } finally { btn.disabled=false; btn.querySelector(".spin")?.remove(); }
 }
@@ -607,42 +610,64 @@ function renderQueue(){
     if(j.status==="downloading" && j.eta!=null) meta.push(`<span>${fmtDur(j.eta)} rimanenti</span>`);
     meta.push(`<span class="tag">${esc(j.quality)}</span>`, siteHTML(siteOf(j.url, j.site)));
     if(j.current) meta.push(`<span class="now">${esc(j.current)}</span>`);
-    const acts = busy(j) ? `<button class="btn sm icon" title="Annulla" onclick="api.cancel('${j.id}')">${IC.x}</button>`
-      : j.status==="done" ? `${j.file?`<button class="btn sm icon" title="Apri" onclick='api.open_file(${JSON.stringify(j.file)})'>${IC.open}</button>`:""}<button class="btn sm icon" title="Mostra nella cartella" onclick='api.open_folder(${JSON.stringify(j.folder)}, ${JSON.stringify(j.file)})'>${IC.folder}</button>`
-      : `<button class="btn sm icon" title="Riprova" onclick="retry('${j.id}')">${IC.retry}</button>`;
-    return `<div class="job ${j.status}">
+    // i pulsanti portano solo l'id: i dati (percorsi, link) si leggono da "jobs" al clic,
+    // così un titolo o un percorso strano non finisce mai dentro l'HTML come codice
+    const id = esc(j.id);
+    const acts = busy(j) ? `<button class="btn sm icon" title="Annulla" data-act="cancel" data-id="${id}">${IC.x}</button>`
+      : j.status==="done" ? `${j.file?`<button class="btn sm icon" title="Apri" data-act="open" data-id="${id}">${IC.open}</button>`:""}<button class="btn sm icon" title="Mostra nella cartella" data-act="folder" data-id="${id}">${IC.folder}</button>`
+      : `<button class="btn sm icon" title="Riprova" data-act="retry" data-id="${id}">${IC.retry}</button>`;
+    return `<div class="job ${esc(j.status)}">
       <div class="thumb">${thumbHTML(j.thumbnail)}</div>
       <div class="job-main">
         <div class="job-title">${esc(j.title)}</div>
         <div class="job-meta">${meta.join("")}</div>
-        <div class="bar"><i style="width:${j.percent}%"></i></div>
+        <div class="bar"><i style="width:${+j.percent||0}%"></i></div>
         ${j.error?`<div class="job-err" title="${esc(j.error)}">${esc(j.error)}</div>`:""}
       </div>
       <div class="job-acts">${acts}</div></div>`;
   }).join("");
 }
+$("#queue").addEventListener("click", e => {
+  const b = e.target.closest("button[data-act]"); if(!b) return;
+  const j = jobs[b.dataset.id]; if(!j) return;
+  const act = b.dataset.act;
+  if(act==="cancel") api.cancel(j.id);
+  else if(act==="open") api.open_file(j.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
+  else if(act==="folder") api.open_folder(j.folder, j.file);
+  else if(act==="retry") retry(j.id);
+});
 async function retry(id){ delete jobs[id]; await api.retry(id); }
 $("#clearBtn").onclick = async () => { await api.clear_finished();
   for(const k in jobs) if(!busy(jobs[k])) delete jobs[k]; renderQueue(); };
 $("#openFolderBtn").onclick = () => api.open_folder(settings.folder, null);
 
 /* ---------- cronologia ---------- */
+let shownHistory = [];      // le voci mostrate ora: i pulsanti ne portano solo la posizione
 function renderHistory(){
   const q = $("#histSearch").value.toLowerCase();
-  const list = history.filter(h => !q || (h.title||"").toLowerCase().includes(q));
+  const list = history.filter(h => !q || String(h.title||"").toLowerCase().includes(q));
+  shownHistory = list;
   if(!list.length){ $("#hist").innerHTML = `<div class="panel empty" style="grid-column:1/-1">${q?"Nessun risultato":"Ancora nessun download"}</div>`; return; }
-  $("#hist").innerHTML = list.map(h=>`<div class="panel h-item">
+  $("#hist").innerHTML = list.map((h,i)=>`<div class="panel h-item">
     <div class="thumb">${thumbHTML(h.thumbnail)}</div>
     <div class="h-body">
       <div class="h-title" title="${esc(h.title)}">${esc(h.title)}</div>
       <div class="h-meta">${siteHTML(siteOf(h.url,h.site))}<span class="tag">${esc(h.quality)}</span><span>${esc(h.date)}</span></div>
       <div class="h-acts">
-        <button class="btn sm" onclick='api.open_file(${JSON.stringify(h.file)}).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"))'>Apri</button>
-        <button class="btn sm icon" title="Mostra nella cartella" onclick='api.open_folder(${JSON.stringify(h.folder)}, ${JSON.stringify(h.file)})'>${IC.folder}</button>
-        <button class="btn sm icon" title="Scarica di nuovo" onclick='redl(${JSON.stringify(h.url)})'>${IC.retry}</button>
+        <button class="btn sm" data-act="open" data-i="${i}">Apri</button>
+        <button class="btn sm icon" title="Mostra nella cartella" data-act="folder" data-i="${i}">${IC.folder}</button>
+        <button class="btn sm icon" title="Scarica di nuovo" data-act="redl" data-i="${i}">${IC.retry}</button>
       </div>
     </div></div>`).join("");
 }
+$("#hist").addEventListener("click", e => {
+  const b = e.target.closest("button[data-act]"); if(!b) return;
+  const h = shownHistory[+b.dataset.i]; if(!h) return;
+  const act = b.dataset.act;
+  if(act==="open") api.open_file(h.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
+  else if(act==="folder") api.open_folder(h.folder, h.file);
+  else if(act==="redl") redl(h.url);
+});
 function redl(url){ document.querySelector('.nav[data-view="download"]').click(); $("#url").value=url; syncInput(); analyze(); }
 $("#histSearch").oninput = renderHistory;
 $("#clearHistBtn").onclick = async () => { if(!confirm("Svuotare la cronologia? I file scaricati non vengono toccati.")) return;
@@ -688,7 +713,8 @@ $("#uninstallBtn").onclick = async () => {
 $("#unCancel").onclick = () => $("#uninstall").classList.remove("show");
 $("#unConfirm").onclick = async () => {
   $("#unConfirm").disabled = true; $("#unConfirm").textContent = "Disinstallo…";
-  await api.uninstall();
+  const ok = await api.uninstall();       // Python chiede un'ultima conferma con una finestra di Windows
+  if(!ok){ $("#unConfirm").disabled = false; $("#unConfirm").textContent = "Disinstalla"; $("#uninstall").classList.remove("show"); }
 };
 
 /* ---------- eventi dal backend ---------- */
@@ -720,7 +746,9 @@ $("#setupRetry").onclick = ensureDeps;
 
 /* ---------- versione di AxGrab e aggiornamenti ---------- */
 let appInfo = {}, pendingUpdate = null;
-const skipped = () => { try { return localStorage.getItem("axgrab-skip") || ""; } catch { return ""; } };
+// la versione rimandata con "Più tardi" sta nelle impostazioni: il localStorage della finestra
+// non sopravvive alla chiusura dell'app
+const skipped = () => settings.skip_version || "";
 async function checkAppUpdate(manual){
   const r = await api.check_update();
   if(!r.ok){ if(manual) toast("Non riesco a controllare gli aggiornamenti: "+r.error, "var(--warn)"); return; }
@@ -743,7 +771,7 @@ $("#ubGet").onclick = async () => {
   b.disabled=false; $("#ubLater").disabled=false; b.textContent="Aggiorna ora";
   if(!r.ok) toast("Aggiornamento non riuscito: " + r.error, "var(--err)");
 };
-$("#ubLater").onclick = () => { try { localStorage.setItem("axgrab-skip", pendingUpdate?.latest || ""); } catch {} $("#updateBanner").hidden = true; };
+$("#ubLater").onclick = () => { $("#updateBanner").hidden = true; save({skip_version: pendingUpdate?.latest || ""}); };
 $("#checkAppBtn").onclick = async () => {
   const b=$("#checkAppBtn"); b.disabled=true; b.innerHTML='<div class="spin"></div>Controllo';
   await checkAppUpdate(true); b.disabled=false; b.textContent="Controlla aggiornamenti";

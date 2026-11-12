@@ -53,7 +53,8 @@ elimina quella cartella, l'EXE e i suoi collegamenti. I video scaricati non veng
 - **"… è aperto e blocca i suoi cookie"**: chiudi quel browser una volta e riprova.
 - **Un sito ha smesso di funzionare**: *Impostazioni → Aggiornamenti → yt-dlp → Aggiorna*.
 - **È lento**: *Impostazioni → Dati e disinstallazione → Log* apre `axgrab.log`, con i tempi di ogni analisi
-  e download. Attenzione: il log contiene i link che hai scaricato, non condividerlo in pubblico.
+  e download. Il log riporta solo i siti (es. `www.youtube.com`), non i link completi, e si svuota
+  insieme alla cronologia.
 
 ---
 
@@ -64,15 +65,29 @@ elimina quella cartella, l'EXE e i suoi collegamenti. I video scaricati non veng
 | `ui/index.html` | interfaccia (aperta in un browser parte in modalità demo) |
 | `assets/logo.png` | logo originale su fondo nero |
 | `make_icon.py` | dal logo genera `ui/logo.png`, `axgrab.ico` e `assets/icona-1024.png` |
-| `crea-exe.bat` | ricrea `AxGrab.exe` (serve Python 3.12) |
+| `firma.py` | firma delle release: crea `AxGrab.exe.sig`; l'app lo controlla prima di aggiornarsi |
+| `crea-exe.bat` | ricrea `AxGrab.exe` e lo firma (serve Python 3.12) |
+| `requirements-build.txt` | versioni esatte delle librerie usate per creare l'EXE |
 
 ### Pubblicare una nuova versione
 1. In `app.py` aumenta `APP_VERSION` (es. `1.0.0` → `1.0.1` per correzioni, `1.1.0` per novità).
-2. Esegui `crea-exe.bat`.
+2. Esegui `crea-exe.bat`: crea `AxGrab.exe` e, accanto, il file di firma `AxGrab.exe.sig`.
 3. Su GitHub: **Releases → Draft a new release**, tag `v` + versione (es. `v1.0.1`), scrivi le novità e
-   allega il nuovo `AxGrab.exe`. Il tag deve corrispondere ad `APP_VERSION`: è quello che AxGrab confronta
-   per avvisare gli altri.
+   allega **sia `AxGrab.exe` sia `AxGrab.exe.sig`**. Il tag deve corrispondere ad `APP_VERSION`: è quello
+   che AxGrab confronta per avvisare gli altri, ed è scritto dentro la firma.
 4. Se hai modificato il codice, caricalo anche nel repository (*Add file → Upload files*).
+
+### La firma degli aggiornamenti
+AxGrab installa un aggiornamento solo se la release contiene un `AxGrab.exe.sig` valido per quella
+versione. La firma si fa con una **chiave privata** che sta solo sul PC di chi pubblica, in
+`%USERPROFILE%\.axgrab-firma\chiave-privata.txt` (fuori dal progetto); in `app.py` c'è solo la chiave
+pubblica (`RELEASE_PUBLIC_KEY`).
+- **Non caricare mai la chiave privata** su GitHub e non mandarla a nessuno.
+- **Fanne una copia di riserva** (chiavetta USB, gestore di password). Se la perdi, le versioni già
+  installate rifiutano gli aggiornamenti automatici: bisogna crearne una nuova (`python firma.py
+  nuova-chiave`), metterla in `app.py` e chiedere a tutti di scaricare l'EXE a mano una volta.
+- Senza `.sig`, o se l'EXE allegato è stato cambiato dopo la firma, l'app mostra un errore e non
+  installa nulla.
 
 ## Licenza
 [MIT](LICENSE) © 2026 nonsonoAxel. AxGrab scarica e usa [yt-dlp](https://github.com/yt-dlp/yt-dlp)
