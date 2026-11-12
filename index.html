@@ -1,0 +1,795 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- limita ciò che la pagina può contattare: solo se stessa, più le miniature (immagini https).
+     'unsafe-inline' e 'unsafe-eval' servono a pywebview per il ponte verso Python -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<title>AxGrab</title>
+<style>
+:root{
+  /* superfici */
+  --bg:#0e0e10; --side:#0b0b0d; --s1:#141417; --s2:#1a1a1e; --s3:#222227;
+  --line:#232328; --line-2:#2e2e35;
+  /* superfici di vetro sopra il bagliore dello sfondo */
+  --glass:rgba(255,255,255,.035); --glass-2:rgba(255,255,255,.06); --glass-line:rgba(255,255,255,.075);
+  /* testo */
+  --text:#e6e3e6; --muted:#9a97a0; --dim:#6b6872;
+  /* colori del logo AxGrab: magenta -> viola -> blu. Il viola è l'accento dell'interfaccia */
+  --brand-1:#b30ce0; --brand-2:#6239e3; --brand-3:#0c6beb;
+  --brand-grad:linear-gradient(90deg,var(--brand-1),var(--brand-2) 55%,var(--brand-3));
+  --btn-grad:linear-gradient(135deg,var(--brand-1) 0%,var(--brand-2) 55%,var(--brand-3) 100%);
+  --accent:#6239e3; --accent-hover:#7552ec; --on-accent:#ffffff;
+  --accent-soft:color-mix(in srgb, var(--accent) 14%, transparent);
+  --ok:#3fb97f; --err:#e5484d; --warn:#e2a336;
+  --r:12px;
+  --mono:"Cascadia Mono","Cascadia Code",Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+/* fondo con un bagliore fisso del brand */
+html,body{height:100%;background-color:var(--bg);
+  background-image:
+    radial-gradient(820px 480px at 90% -10%, rgba(120,60,220,.30), transparent 64%),
+    radial-gradient(640px 480px at -8% 110%, rgba(176,30,200,.18), transparent 62%),
+    radial-gradient(600px 420px at 106% 106%, rgba(12,110,230,.18), transparent 62%);
+  background-attachment:fixed}
+body{color:var(--text);font:13.5px/1.45 "Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
+  overflow:hidden;user-select:none;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+button{font:inherit;color:inherit}
+svg{display:block}
+
+/* ---------- barra del titolo ---------- */
+.titlebar{height:38px;display:flex;align-items:center;background:rgba(10,10,12,.55);backdrop-filter:blur(20px);
+  border-bottom:1px solid var(--glass-line);position:relative;z-index:5}
+.tb-drag{flex:1;height:100%;display:flex;align-items:center;gap:9px;padding-left:14px}
+.mark{height:15px;width:auto;display:block;flex:none}
+.tb-name{font-size:12.5px;font-weight:600;letter-spacing:.1px}
+.wc{display:flex;height:100%}
+.wc button{width:46px;height:100%;border:none;background:none;display:grid;place-items:center;color:var(--muted);cursor:default;transition:background .12s,color .12s}
+.wc button svg{width:10px;height:10px}
+.wc button:hover{background:var(--s3);color:var(--text)}
+.wc .close:hover{background:#c42b1c;color:#fff}
+
+/* bordi per ridimensionare */
+.rz{position:fixed;z-index:50}
+.rz.n{top:0;left:8px;right:8px;height:4px;cursor:ns-resize}
+.rz.s{bottom:0;left:8px;right:8px;height:5px;cursor:ns-resize}
+.rz.w{left:0;top:8px;bottom:8px;width:5px;cursor:ew-resize}
+.rz.e{right:0;top:8px;bottom:8px;width:5px;cursor:ew-resize}
+.rz.nw{left:0;top:0;width:8px;height:8px;cursor:nwse-resize}
+.rz.ne{right:0;top:0;width:8px;height:8px;cursor:nesw-resize}
+.rz.sw{left:0;bottom:0;width:10px;height:10px;cursor:nesw-resize}
+.rz.se{right:0;bottom:0;width:10px;height:10px;cursor:nwse-resize}
+body.maxed .rz{display:none}
+
+/* ---------- layout ---------- */
+.app{display:grid;grid-template-columns:208px 1fr;height:calc(100% - 38px)}
+.side{background:rgba(10,10,12,.5);backdrop-filter:blur(24px);border-right:1px solid var(--glass-line);padding:16px 12px;
+  display:flex;flex-direction:column;gap:2px}
+.nav{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px;border-radius:9px;position:relative;color:var(--muted);
+  cursor:pointer;font-weight:500;transition:background .12s,color .12s}
+.nav svg{width:16px;height:16px;flex:none;stroke-width:1.75}
+.nav:hover{background:var(--glass);color:var(--text)}
+.nav.active{background:var(--glass-2);box-shadow:inset 0 0 0 1px var(--glass-line);color:var(--text)}
+.nav.active::before{content:"";position:absolute;left:-12px;top:9px;bottom:9px;width:3px;border-radius:0 3px 3px 0;background:var(--btn-grad)}
+.nav.active svg{color:#c9a7ff}
+.nav .count{margin-left:auto;font-size:11px;font-weight:600;color:#fff;background:var(--btn-grad);border-radius:10px;padding:0 7px;line-height:18px}
+.side-foot{margin-top:auto;padding:10px;border-top:1px solid var(--glass-line);font-size:11.5px;color:var(--dim);line-height:1.6}
+.side-foot .row{display:flex;align-items:center;gap:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
+
+main{overflow-y:auto;padding:30px 40px 40px}
+main::-webkit-scrollbar{width:10px}
+main::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:10px;border:3px solid transparent;background-clip:padding-box}
+.view{display:none;max-width:860px;margin:0 auto}
+.view.active{display:block}
+h1{font-size:26px;font-weight:700;letter-spacing:-.6px}
+h1 .g{background:linear-gradient(90deg,#c25ad3,#8b6ae6 50%,#4a8ff0);-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{color:var(--muted);margin:6px 0 16px}
+.sites{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 22px}
+.chip-site{font-size:11.5px;color:var(--muted);height:24px;padding:0 10px;border-radius:12px;background:var(--glass);border:1px solid var(--glass-line);display:flex;align-items:center;gap:6px}
+.chip-site i{width:6px;height:6px;border-radius:50%}
+
+/* ---------- controlli ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:34px;padding:0 14px;border-radius:9px;border:1px solid var(--glass-line);
+  background:var(--glass-2);font-weight:500;cursor:pointer;white-space:nowrap;transition:background .12s,border-color .12s}
+.btn svg{width:15px;height:15px;stroke-width:1.9}
+.btn:hover{background:rgba(255,255,255,.1)}
+.btn.primary{background:var(--btn-grad);border:none;color:var(--on-accent);font-weight:600;box-shadow:0 8px 22px -10px rgba(99,57,190,.9)}
+.btn.primary:hover{background:var(--btn-grad);filter:brightness(1.12)}
+.btn.danger{background:none;border-color:color-mix(in srgb,var(--err) 45%,transparent);color:#ff8d8f}
+.btn.danger:hover{background:color-mix(in srgb,var(--err) 12%,transparent)}
+.btn.danger.solid{background:var(--err);color:#fff;border-color:transparent}
+.btn.sm{height:28px;padding:0 10px;font-size:12.5px}
+.btn.icon{width:28px;padding:0}
+.btn:disabled{opacity:.45;pointer-events:none}
+.spin{width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .7s linear infinite;opacity:.8}
+@keyframes sp{to{transform:rotate(360deg)}}
+
+.field{display:flex;gap:8px;align-items:flex-start;padding:6px;border-radius:14px;background:var(--glass);border:1px solid var(--glass-line);
+  transition:border-color .15s,box-shadow .15s}
+.field:focus-within{border-color:rgba(139,106,230,.6);box-shadow:0 0 0 4px rgba(99,57,190,.16)}
+.field textarea{flex:1;height:40px;min-height:40px;padding:10px 10px;border-radius:6px;border:none;background:none;color:var(--text);
+  font:inherit;font-size:14.5px;line-height:20px;resize:none;outline:none;user-select:text;transition:border-color .12s}
+.field textarea::placeholder{color:var(--dim)}
+.field .btn{height:40px}
+.hint{font-size:12px;color:var(--dim);margin-top:8px;margin-left:4px}
+
+.seg{display:inline-flex;background:rgba(0,0,0,.22);border:1px solid var(--glass-line);border-radius:10px;padding:3px;gap:2px}
+.seg button{border:none;background:none;color:var(--muted);height:28px;padding:0 11px;border-radius:7px;cursor:pointer;font-size:12.5px;font-weight:500;display:flex;align-items:center;gap:6px}
+.seg button svg{width:14px;height:14px;stroke-width:1.8}
+.seg button:hover:not(.on){color:var(--text)}
+.seg button.on{background:rgba(255,255,255,.1);box-shadow:inset 0 0 0 1px var(--glass-line);color:var(--text)}
+
+select{height:30px;padding:0 28px 0 10px;border-radius:8px;border:1px solid var(--glass-line);background:var(--glass-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%239a9aa3' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 10px center;
+  color:var(--text);font:inherit;font-size:12.5px;outline:none;cursor:pointer;-webkit-appearance:none;appearance:none}
+select option,select optgroup{background:var(--s2)}
+select:disabled{opacity:.4;cursor:default}
+.toggle{width:34px;height:20px;border-radius:10px;background:rgba(255,255,255,.12);position:relative;cursor:pointer;flex:none;transition:background .15s}
+.toggle::after{content:"";position:absolute;top:3px;left:3px;width:14px;height:14px;border-radius:50%;background:#c9c9cf;transition:left .15s,background .15s}
+.toggle.on{background:var(--btn-grad)}
+.toggle.on::after{left:17px;background:#fff}
+
+.panel{background:var(--glass);border:1px solid var(--glass-line);border-radius:var(--r);backdrop-filter:blur(18px);
+  box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -24px rgba(0,0,0,.6)}
+.thumb{position:relative;aspect-ratio:16/9;border-radius:5px;overflow:hidden;background:linear-gradient(135deg,#2a1840,#13233d);flex:none}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb .dur{position:absolute;right:5px;bottom:5px;background:rgba(0,0,0,.75);font-size:11px;font-weight:600;padding:1px 5px;border-radius:3px}
+.site{display:inline-flex;align-items:center;gap:6px;color:var(--muted)}
+.site i{width:6px;height:6px;border-radius:50%}
+.tag{font-size:11px;font-weight:600;color:var(--muted);border:1px solid var(--line-2);border-radius:4px;padding:0 5px;line-height:17px}
+
+/* ---------- avviso di aggiornamento ---------- */
+.update-banner{max-width:860px;margin:0 auto 22px;display:flex;align-items:center;gap:14px;padding:12px 14px;border-radius:var(--r);
+  background:linear-gradient(var(--bg),var(--bg)) padding-box, var(--btn-grad) border-box;border:1px solid transparent;
+  box-shadow:0 14px 34px -20px rgba(98,57,227,.9)}
+.update-banner[hidden]{display:none}
+.update-banner img{height:30px}
+.ub-text{flex:1;min-width:0}
+.ub-text b{display:block;font-weight:600}
+.ub-text span{display:block;color:var(--muted);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ---------- anteprima ---------- */
+.preview{display:none;margin-top:16px}
+.preview.show{display:block}
+.pv-top{display:flex;gap:20px;padding:18px}
+.pv-top .thumb{width:240px;border-radius:10px}
+.pv-info{min-width:0;display:flex;flex-direction:column;gap:6px;padding-top:2px}
+.pv-title{font-size:17px;font-weight:600;line-height:1.35;letter-spacing:-.2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pv-meta{color:var(--muted);font-size:12.5px;display:flex;gap:12px;flex-wrap:wrap}
+.opts{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;border-top:1px solid var(--glass-line);
+  background:rgba(0,0,0,.14);border-radius:0 0 var(--r) var(--r)}
+.opts .grow{flex:1}
+
+/* ---------- coda ---------- */
+.sec{display:flex;align-items:center;justify-content:space-between;margin:30px 0 10px;gap:12px}
+.sec h2{font-size:13px;font-weight:600;display:flex;gap:10px;align-items:baseline}
+.sec h2 span{color:var(--dim);font-weight:400;font-size:12px}
+.sec .acts{display:flex;gap:6px}
+.list .job{display:flex;gap:14px;align-items:center;padding:12px 14px;border-top:1px solid var(--glass-line)}
+.list .job:first-child{border-top:none}
+.job .thumb{width:112px;border-radius:7px}
+.job-main{flex:1;min-width:0}
+.job-title{font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.job-meta{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;margin:3px 0 7px;white-space:nowrap;overflow:hidden}
+.job-meta .now{overflow:hidden;text-overflow:ellipsis;color:var(--dim)}
+.status{font-weight:500;color:var(--text)}
+.bar{height:4px;border-radius:2px;background:rgba(255,255,255,.07);overflow:hidden}
+.bar>i{display:block;height:100%;width:0;background:var(--brand-grad);background-size:var(--bar-w,860px) 100%;transition:width .25s ease}
+.job.processing .bar>i{width:100%!important;opacity:.55;animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+.job.done .bar>i{background:var(--ok)} .job.done .status{color:var(--ok)}
+.job.error .bar>i{background:var(--err);width:100%!important} .job.error .status{color:#ff8d8f}
+.job.cancelled{opacity:.5}
+.job-err{color:#ff8d8f;font-size:12px;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.job-acts{display:flex;gap:4px}
+.empty{padding:40px;text-align:center;color:var(--dim);font-size:12.5px}
+.empty svg{width:30px;height:30px;margin:0 auto 10px;opacity:.5}
+
+/* ---------- cronologia ---------- */
+.search{display:flex;align-items:center;gap:8px;height:30px;padding:0 10px;border-radius:6px;border:1px solid var(--line-2);background:var(--s1);width:240px}
+.search svg{width:14px;height:14px;color:var(--dim)}
+.search input{flex:1;background:none;border:none;outline:none;color:var(--text);font:inherit;font-size:12.5px;user-select:text}
+.hist{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:12px}
+.h-item{overflow:hidden;transition:border-color .15s,transform .15s}
+.h-item:hover{border-color:rgba(255,255,255,.14);transform:translateY(-1px)}
+.h-item .thumb{border-radius:0}
+.h-body{padding:10px 12px 12px}
+.h-title{font-weight:500;font-size:13px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:35px}
+.h-meta{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:11.5px;margin:7px 0 10px}
+.h-acts{display:flex;gap:6px}
+.h-acts .btn:first-child{flex:1}
+
+/* ---------- impostazioni ---------- */
+.group-label{font-size:11.5px;font-weight:600;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin:22px 0 8px 2px}
+.group-label:first-of-type{margin-top:4px}
+.row{display:flex;align-items:center;gap:18px;padding:13px 16px;border-top:1px solid var(--glass-line)}
+.row:first-child{border-top:none}
+.row .lbl{flex:1;min-width:0}
+.row .lbl b{display:block;font-weight:500}
+.row .lbl span{display:block;color:var(--muted);font-size:12px;margin-top:2px}
+.path{font-family:var(--mono);font-size:11.5px;color:var(--text);background:rgba(0,0,0,.25);border:1px solid var(--glass-line);border-radius:4px;padding:3px 7px;margin-top:6px;
+  display:inline-block;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;user-select:text;vertical-align:top}
+.about{color:var(--dim);font-size:12px;margin-top:30px;display:flex;flex-direction:column;align-items:center;gap:10px}
+.about img{height:26px;opacity:.9}
+.about a{color:var(--muted);text-decoration:none;border-bottom:1px solid var(--glass-line)}
+.about a:hover{color:var(--text)}
+
+/* ---------- finestre e notifiche ---------- */
+.overlay{position:fixed;inset:38px 0 0 0;z-index:20;background:rgba(5,4,10,.6);backdrop-filter:blur(6px);display:none;place-items:center}
+.overlay.show{display:grid}
+.modal{width:420px;padding:22px;background:rgba(22,20,30,.92)}
+.modal h3{font-size:15px;font-weight:600;margin-bottom:6px}
+.modal p{color:var(--muted);margin-bottom:14px}
+.modal ul{margin:0 0 16px 18px;color:var(--muted);font-size:12.5px;line-height:1.7}
+.modal ul b{color:var(--text);font-weight:500}
+.modal .bar{height:4px;margin:4px 0 8px}
+.modal .small{font-size:12px;color:var(--dim)}
+.modal .acts{display:flex;justify-content:flex-end;gap:8px}
+.toasts{position:fixed;right:16px;bottom:16px;z-index:30;display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.toast{max-width:400px;padding:9px 12px;border-radius:10px;background:rgba(26,24,34,.9);backdrop-filter:blur(16px);border:1px solid var(--glass-line);
+  box-shadow:0 8px 24px rgba(0,0,0,.35);display:flex;gap:9px;align-items:flex-start;font-size:12.5px;animation:tin .18s ease-out}
+.toast i{width:6px;height:6px;border-radius:50%;flex:none;margin-top:6px}
+@keyframes tin{from{opacity:0;transform:translateY(4px)}}
+</style>
+</head>
+<body>
+<div class="rz n" data-e="n"></div><div class="rz s" data-e="s"></div><div class="rz w" data-e="w"></div><div class="rz e" data-e="e"></div>
+<div class="rz nw" data-e="nw"></div><div class="rz ne" data-e="ne"></div><div class="rz sw" data-e="sw"></div><div class="rz se" data-e="se"></div>
+
+<header class="titlebar">
+  <div class="tb-drag" id="drag">
+    <img class="mark" src="logo.png" alt="" draggable="false">
+    <span class="tb-name">AxGrab</span>
+  </div>
+  <div class="wc">
+    <button id="wcMin" title="Riduci a icona"><svg viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor"/></svg></button>
+    <button id="wcMax" title="Ingrandisci"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor"><rect x=".5" y=".5" width="9" height="9"/></svg></button>
+    <button id="wcClose" class="close" title="Chiudi"><svg viewBox="0 0 10 10" stroke="currentColor"><path d="M0 0l10 10M10 0L0 10"/></svg></button>
+  </div>
+</header>
+
+<div class="app">
+  <aside class="side">
+    <div class="nav active" data-view="download">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></svg>Scarica<span class="count" id="activeCount" hidden>0</span>
+    </div>
+    <div class="nav" data-view="history">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>Cronologia
+    </div>
+    <div class="nav" data-view="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Impostazioni
+    </div>
+    <div class="side-foot">
+      <div class="row" style="padding:0;border:none"><span class="dot" id="depDot"></span><span id="verLbl">yt-dlp —</span></div>
+      <div class="row" style="padding:0;border:none" id="folderLbl"></div>
+    </div>
+  </aside>
+
+  <main>
+    <div class="update-banner" id="updateBanner" hidden>
+      <img src="logo.png" alt="" draggable="false">
+      <div class="ub-text"><b id="ubTitle">È disponibile una nuova versione</b><span id="ubSub"></span></div>
+      <button class="btn sm" id="ubLater">Più tardi</button>
+      <button class="btn sm primary" id="ubGet">Scarica</button>
+    </div>
+    <!-- SCARICA -->
+    <section class="view active" id="view-download">
+      <h1>Scarica <span class="g">qualsiasi video</span></h1>
+      <p class="sub">Incolla un link, oppure più link uno per riga per metterli tutti in coda.</p>
+      <div class="sites" id="sites"></div>
+
+      <div class="field">
+        <textarea id="url" placeholder="https://…" spellcheck="false"></textarea>
+        <button class="btn" id="pasteBtn">Incolla</button>
+        <button class="btn primary" id="analyzeBtn"><span>Analizza</span></button>
+      </div>
+      <div class="hint">Premi Invio per analizzare</div>
+
+      <div class="panel preview" id="preview">
+        <div class="pv-top">
+          <div class="thumb" id="pvThumb"></div>
+          <div class="pv-info">
+            <div class="pv-title" id="pvTitle"></div>
+            <div class="pv-meta" id="pvMeta"></div>
+          </div>
+        </div>
+        <div class="opts">
+          <div class="seg" id="modeSeg">
+            <button data-v="video"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10.5 5-3v9l-5-3"/></svg>Video</button>
+            <button data-v="audio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></svg>Audio</button>
+          </div>
+          <div class="seg" id="qualitySeg"></div>
+          <div class="grow"></div>
+          <button class="btn primary" id="dlBtn">Scarica</button>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h2>Coda <span id="queueInfo"></span></h2>
+        <div class="acts">
+          <button class="btn sm" id="openFolderBtn">Apri cartella</button>
+          <button class="btn sm" id="clearBtn">Rimuovi completati</button>
+        </div>
+      </div>
+      <div class="panel list" id="queue"></div>
+    </section>
+
+    <!-- CRONOLOGIA -->
+    <section class="view" id="view-history">
+      <h1>Cronologia</h1>
+      <p class="sub">I file scaricati, con link per aprirli o scaricarli di nuovo.</p>
+      <div class="sec" style="margin-top:0">
+        <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="histSearch" placeholder="Cerca per titolo"></div>
+        <button class="btn sm" id="clearHistBtn">Svuota cronologia</button>
+      </div>
+      <div class="hist" id="hist"></div>
+    </section>
+
+    <!-- IMPOSTAZIONI -->
+    <section class="view" id="view-settings">
+      <h1>Impostazioni</h1>
+      <p class="sub">Le modifiche vengono salvate subito.</p>
+
+      <div class="group-label">Download</div>
+      <div class="panel">
+        <div class="row">
+          <div class="lbl"><b>Cartella di destinazione</b><span class="path" id="setFolder"></span></div>
+          <button class="btn sm" id="chooseFolderBtn">Cambia…</button>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>Formato audio</b><span>M4A non richiede conversione ed è il più veloce. MP3 si apre ovunque ma richiede qualche secondo in più.</span></div>
+          <select id="setAudio"><option value="m4a">M4A</option><option value="mp3">MP3</option></select>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>Download contemporanei</b><span>Quanti elementi della coda scaricare insieme.</span></div>
+          <select id="setParallel"><option>1</option><option>2</option><option>3</option><option>4</option></select>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>Playlist intere</b><span>Se il link fa parte di una playlist, scarica tutti i video.</span></div>
+          <div class="toggle" id="setPlaylist"></div>
+        </div>
+      </div>
+
+      <div class="group-label">Accesso</div>
+      <div class="panel">
+        <div class="row">
+          <div class="lbl"><b>Cookie dal browser</b><span>Solo per contenuti che richiedono login (Instagram, video privati, limiti di età). Con Helium, Brave ed Edge chiudi il browser se compare un avviso. Chrome di solito non è leggibile.</span></div>
+          <select id="setCookies">
+            <option value="none">Nessuno</option>
+            <optgroup label="Firefox"><option value="firefox">Firefox</option><option value="zen">Zen</option></optgroup>
+            <optgroup label="Chromium"><option value="helium">Helium</option><option value="brave">Brave</option><option value="edge">Edge</option><option value="chrome">Chrome</option></optgroup>
+          </select>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>Quando usare i cookie</b><span>Leggere i cookie rallenta l'analisi di qualche secondo. "Solo quando servono" li usa subito su Instagram e Facebook, e altrove solo se il sito chiede il login.</span></div>
+          <select id="setCookieWhen"><option value="auto">Solo quando servono</option><option value="always">Sempre</option></select>
+        </div>
+      </div>
+
+      <div class="group-label">Aggiornamenti</div>
+      <div class="panel">
+        <div class="row">
+          <div class="lbl"><b>AxGrab</b><span id="appVer">—</span></div>
+          <button class="btn sm" id="checkAppBtn">Controlla aggiornamenti</button>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>yt-dlp</b><span id="setVer">—</span></div>
+          <button class="btn sm" id="updateBtn">Aggiorna</button>
+        </div>
+      </div>
+
+      <div class="group-label">Dati e disinstallazione</div>
+      <div class="panel">
+        <div class="row">
+          <div class="lbl"><b>Dati dell'app</b><span>Componenti, impostazioni, cronologia e log · <span id="dataSize" style="display:inline;margin:0">—</span></span><span class="path" id="dataPath"></span></div>
+          <div style="display:flex;gap:6px"><button class="btn sm" id="openLogBtn" title="Il file axgrab.log contiene i tempi di ogni analisi: utile per capire cosa rallenta">Log</button><button class="btn sm" id="openDataBtn">Apri cartella</button></div>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>Disinstalla AxGrab</b><span>Rimuove i dati qui sopra, l'EXE e i suoi collegamenti. I video scaricati non vengono toccati.</span></div>
+          <button class="btn sm danger" id="uninstallBtn">Disinstalla…</button>
+        </div>
+      </div>
+
+      <div class="about"><img src="logo.png" alt="AxGrab" draggable="false"><span>AxGrab <span id="aboutVer"></span> · creato da nonsonoAxel · basato su yt-dlp</span>
+        <a href="#" id="repoLink">github.com/nonsonoAxel/AxGrab</a></div>
+    </section>
+  </main>
+</div>
+
+<div class="overlay" id="setup">
+  <div class="panel modal">
+    <h3>Configurazione iniziale</h3>
+    <p>Scarico yt-dlp, ffmpeg e Deno (circa 150 MB da scaricare, 320 MB su disco) dai rilasci ufficiali su GitHub. Serve solo la prima volta.</p>
+    <div class="bar"><i id="setupBar"></i></div>
+    <div class="small" id="setupLbl">Preparazione…</div>
+    <div class="acts" style="margin-top:14px"><button class="btn sm" id="setupRetry" style="display:none">Riprova</button></div>
+  </div>
+</div>
+
+<div class="overlay" id="uninstall">
+  <div class="panel modal">
+    <h3>Disinstallare AxGrab?</h3>
+    <p>L'app si chiuderà e verranno eliminati definitivamente:</p>
+    <ul>
+      <li><b>Dati dell'app</b>: componenti, impostazioni, cronologia, log<br><span class="path" id="unPath" style="margin:2px 0 4px"></span></li>
+      <li id="unExeLi"><b>L'EXE</b> <span class="path" id="unExe" style="margin:2px 0 4px"></span></li>
+      <li><b>I collegamenti</b> all'EXE sul Desktop e nel menu Start</li>
+    </ul>
+    <p style="margin-bottom:18px">I video e gli audio che hai scaricato restano dove sono.</p>
+    <div class="acts">
+      <button class="btn sm" id="unCancel">Annulla</button>
+      <button class="btn sm danger solid" id="unConfirm">Disinstalla</button>
+    </div>
+  </div>
+</div>
+<div class="overlay" id="askBox">
+  <div class="panel modal" role="dialog" aria-modal="true" aria-labelledby="askTitle">
+    <h3 id="askTitle"></h3>
+    <p id="askText" style="margin-bottom:18px"></p>
+    <div class="acts">
+      <button class="btn sm" id="askNo">Annulla</button>
+      <button class="btn sm danger solid" id="askYes">Conferma</button>
+    </div>
+  </div>
+</div>
+<div class="toasts" id="toasts"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const SITES = [
+  {k:"youtu",n:"YouTube",c:"#ff4e45"},{k:"instagram",n:"Instagram",c:"#e1306c"},{k:"tiktok",n:"TikTok",c:"#25f4ee"},
+  {k:"x.com",n:"X",c:"#d6d6d6"},{k:"twitter",n:"X",c:"#d6d6d6"},{k:"facebook",n:"Facebook",c:"#1877f2"},{k:"fb.watch",n:"Facebook",c:"#1877f2"},
+  {k:"twitch",n:"Twitch",c:"#a970ff"},{k:"vimeo",n:"Vimeo",c:"#1ab7ea"},{k:"reddit",n:"Reddit",c:"#ff4500"},{k:"soundcloud",n:"SoundCloud",c:"#ff7700"},
+];
+const siteOf = (url, key="") => { const s=(url+" "+key).toLowerCase(); return SITES.find(x=>s.includes(x.k)) || {n:key||"Web", c:"#9a9aa3"}; };
+document.getElementById("sites").innerHTML = ["YouTube","Instagram","TikTok","X","Facebook","Twitch","Reddit"].map(n=>{
+  const s = SITES.find(x=>x.n===n); return `<span class="chip-site"><i style="background:${s.c}"></i>${n}</span>`;
+}).join("");
+const siteHTML = s => `<span class="site"><i style="background:${s.c}"></i>${esc(s.n)}</span>`;
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtDur = s => { if(!s && s!==0) return ""; s=Math.round(s); const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
+  return (h? h+":"+String(m).padStart(2,"0") : m) + ":" + String(x).padStart(2,"0"); };
+const fmtBytes = b => { if(!b) return "0 B"; const u=["B","KB","MB","GB"]; let i=0; while(b>=1024&&i<3){b/=1024;i++} return b.toFixed(i?1:0)+" "+u[i]; };
+const thumbHTML = (src, dur) => (src ? `<img src="${esc(src)}" referrerpolicy="no-referrer" onerror="this.remove()">` : "") + (dur ? `<span class="dur">${fmtDur(dur)}</span>` : "");
+function toast(msg, color="var(--accent)"){
+  const t=document.createElement("div"); t.className="toast"; t.innerHTML=`<i style="background:${color}"></i><span>${esc(msg)}</span>`;
+  $("#toasts").appendChild(t); setTimeout(()=>{t.style.transition="opacity .25s";t.style.opacity=0;setTimeout(()=>t.remove(),250)}, 4200);
+}
+const IC = {
+  x:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 7l10 10M17 7 7 17"/></svg>',
+  open:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 5.5v13l10-6.5z"/></svg>',
+  folder:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.5l2 2h7.5a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>',
+  retry:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.6-5.9L20 8.5"/><path d="M20 4v4.5h-4.5"/></svg>',
+};
+
+let api, settings = {}, jobs = {}, history = [], current = null;
+
+/* ---------- finestra ---------- */
+$("#drag").addEventListener("mousedown", e => { if(e.button===0 && e.detail===1) api.win_drag(); });
+$("#drag").addEventListener("dblclick", toggleMax);
+document.querySelectorAll(".rz").forEach(r => r.addEventListener("mousedown", e => { if(e.button===0) api.win_resize(r.dataset.e); }));
+$("#wcMin").onclick = () => api.win_minimize();
+$("#wcMax").onclick = toggleMax;
+$("#wcClose").onclick = () => api.win_close();
+async function toggleMax(){
+  const m = await api.win_toggle_max();
+  document.body.classList.toggle("maxed", m);
+  $("#wcMax").title = m ? "Ripristina" : "Ingrandisci";
+  $("#wcMax").innerHTML = m
+    ? '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor"><rect x=".5" y="2.5" width="7" height="7"/><path d="M2.5 2.5v-2h7v7h-2"/></svg>'
+    : '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor"><rect x=".5" y=".5" width="9" height="9"/></svg>';
+}
+
+/* ---------- navigazione ---------- */
+document.querySelectorAll(".nav").forEach(n => n.onclick = () => {
+  document.querySelectorAll(".nav").forEach(x=>x.classList.toggle("active", x===n));
+  document.querySelectorAll(".view").forEach(v=>v.classList.toggle("active", v.id==="view-"+n.dataset.view));
+  if(n.dataset.view==="history") renderHistory();
+  if(n.dataset.view==="settings") loadDataInfo();
+});
+
+/* ---------- opzioni ---------- */
+const QUALS = [["best","Max"],["2160","4K"],["1440","1440p"],["1080","1080p"],["720","720p"],["480","480p"]];
+function renderOpts(){
+  document.querySelectorAll("#modeSeg button").forEach(b=>b.classList.toggle("on", b.dataset.v===settings.mode));
+  const qs = $("#qualitySeg");
+  if(settings.mode==="audio"){
+    const tip = {m4a:"Nessuna conversione: il più veloce", mp3:"Convertito in MP3: qualche secondo in più"};
+    qs.innerHTML = ["m4a","mp3"].map(f=>`<button data-a="${f}" title="${tip[f]}" class="${settings.audio_format===f?"on":""}">${f.toUpperCase()}</button>`).join("");
+  } else {
+    const max = current?.heights?.[0];
+    qs.innerHTML = QUALS.filter(([v])=> v==="best" || !max || +v <= Math.max(max,480))
+      .map(([v,l])=>`<button data-q="${v}" class="${settings.quality===v?"on":""}">${l}</button>`).join("");
+  }
+}
+$("#modeSeg").onclick = e => { const b=e.target.closest("button"); if(b) save({mode:b.dataset.v}); };
+$("#qualitySeg").onclick = e => { const b=e.target.closest("button"); if(!b) return; b.dataset.q ? save({quality:b.dataset.q}) : save({audio_format:b.dataset.a}); };
+async function save(patch){ Object.assign(settings, patch); renderOpts(); renderSettings(); settings = await api.save_settings(patch); }
+
+/* ---------- analisi ---------- */
+const urls = () => $("#url").value.split(/\s+/).map(s=>s.trim()).filter(s=>/^https?:\/\//i.test(s));
+function syncInput(){
+  const n = urls().length;
+  $("#analyzeBtn span").textContent = n>1 ? `Aggiungi ${n} alla coda` : "Analizza";
+  const ta=$("#url"); ta.style.height="38px"; ta.style.height=Math.min(140, ta.scrollHeight+2)+"px";
+}
+$("#url").addEventListener("input", syncInput);
+$("#url").addEventListener("keydown", e => { if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); analyze(); }});
+$("#pasteBtn").onclick = async () => {
+  let t=""; try{ t = await navigator.clipboard.readText(); }catch{}
+  if(!t) t = await api.paste();
+  if(t){ $("#url").value=t.trim(); syncInput(); analyze(); }
+};
+$("#analyzeBtn").onclick = analyze;
+
+async function analyze(){
+  const list = urls();
+  if(!list.length){ toast("Incolla un link valido", "var(--warn)"); return; }
+  if(list.length>1){
+    for(const u of list) await api.start_download(u, {title:u, site:siteOf(u).n}, null);
+    toast(`${list.length} link aggiunti alla coda`, "var(--ok)");
+    $("#url").value=""; syncInput(); return;
+  }
+  const btn=$("#analyzeBtn"); btn.disabled=true; btn.insertAdjacentHTML("afterbegin",'<div class="spin"></div>');
+  $("#preview").classList.remove("show");
+  try{
+    const info = await api.get_info(list[0]);
+    if(!info.ok){ toast(info.error, "var(--err)"); return; }
+    if(info.warning) toast(info.warning, "var(--warn)");
+    current = {...info, url:list[0]};
+    const s = siteOf(list[0], info.site);
+    $("#pvThumb").innerHTML = thumbHTML(info.thumbnail, info.duration);
+    $("#pvTitle").textContent = info.title;
+    $("#pvMeta").innerHTML = [siteHTML(s), info.uploader && esc(info.uploader), info.playlist && `Playlist · ${info.count} video`,
+      info.heights?.[0] && `fino a ${esc(info.heights[0])}p`].filter(Boolean).map(x=>`<span>${x}</span>`).join("");
+    renderOpts(); $("#preview").classList.add("show");
+  } finally { btn.disabled=false; btn.querySelector(".spin")?.remove(); }
+}
+$("#dlBtn").onclick = async () => {
+  if(!current) return;
+  await api.start_download(current.url, {title:current.title, thumbnail:current.thumbnail, site:siteOf(current.url,current.site).n}, null);
+  $("#preview").classList.remove("show"); $("#url").value=""; syncInput(); current=null;
+};
+
+/* ---------- coda ---------- */
+const STATUS = {queued:"In attesa", downloading:"Download", processing:"Elaborazione", done:"Completato", error:"Errore", cancelled:"Annullato"};
+const busy = j => ["queued","downloading","processing"].includes(j.status);
+function renderQueue(){
+  const list = Object.values(jobs).reverse();
+  const active = list.filter(busy).length;
+  $("#activeCount").hidden = !active; $("#activeCount").textContent = active;
+  $("#queueInfo").textContent = list.length ? `${active} in corso · ${list.length} totali` : "";
+  if(!list.length){ $("#queue").innerHTML = `<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></svg>Nessun download in corso</div>`; return; }
+  $("#queue").innerHTML = list.map(j=>{
+    const meta = [`<span class="status">${STATUS[j.status]}${j.status==="downloading"?` ${j.percent.toFixed(0)}%`:""}</span>`];
+    if(j.item) meta.push(`<span>${esc(j.item)}</span>`);
+    if(j.status==="downloading" && j.speed) meta.push(`<span>${fmtBytes(j.speed)}/s</span>`);
+    if(j.status==="downloading" && j.eta!=null) meta.push(`<span>${fmtDur(j.eta)} rimanenti</span>`);
+    meta.push(`<span class="tag">${esc(j.quality)}</span>`, siteHTML(siteOf(j.url, j.site)));
+    if(j.current) meta.push(`<span class="now">${esc(j.current)}</span>`);
+    // i pulsanti portano solo l'id: i dati (percorsi, link) si leggono da "jobs" al clic,
+    // così un titolo o un percorso strano non finisce mai dentro l'HTML come codice
+    const id = esc(j.id);
+    const acts = busy(j) ? `<button class="btn sm icon" title="Annulla" data-act="cancel" data-id="${id}">${IC.x}</button>`
+      : j.status==="done" ? `${j.file?`<button class="btn sm icon" title="Apri" data-act="open" data-id="${id}">${IC.open}</button>`:""}<button class="btn sm icon" title="Mostra nella cartella" data-act="folder" data-id="${id}">${IC.folder}</button>`
+      : `<button class="btn sm icon" title="Riprova" data-act="retry" data-id="${id}">${IC.retry}</button>`;
+    return `<div class="job ${esc(j.status)}">
+      <div class="thumb">${thumbHTML(j.thumbnail)}</div>
+      <div class="job-main">
+        <div class="job-title">${esc(j.title)}</div>
+        <div class="job-meta">${meta.join("")}</div>
+        <div class="bar"><i style="width:${+j.percent||0}%"></i></div>
+        ${j.error?`<div class="job-err" title="${esc(j.error)}">${esc(j.error)}</div>`:""}
+      </div>
+      <div class="job-acts">${acts}</div></div>`;
+  }).join("");
+}
+$("#queue").addEventListener("click", e => {
+  const b = e.target.closest("button[data-act]"); if(!b) return;
+  const j = jobs[b.dataset.id]; if(!j) return;
+  const act = b.dataset.act;
+  if(act==="cancel") api.cancel(j.id);
+  else if(act==="open") api.open_file(j.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
+  else if(act==="folder") api.open_folder(j.folder, j.file);
+  else if(act==="retry") retry(j.id);
+});
+async function retry(id){ delete jobs[id]; await api.retry(id); }
+$("#clearBtn").onclick = async () => { await api.clear_finished();
+  for(const k in jobs) if(!busy(jobs[k])) delete jobs[k]; renderQueue(); };
+$("#openFolderBtn").onclick = () => api.open_folder(settings.folder, null);
+
+/* ---------- cronologia ---------- */
+let shownHistory = [];      // le voci mostrate ora: i pulsanti ne portano solo la posizione
+function renderHistory(){
+  const q = $("#histSearch").value.toLowerCase();
+  const list = history.filter(h => !q || String(h.title||"").toLowerCase().includes(q));
+  shownHistory = list;
+  if(!list.length){ $("#hist").innerHTML = `<div class="panel empty" style="grid-column:1/-1">${q?"Nessun risultato":"Ancora nessun download"}</div>`; return; }
+  $("#hist").innerHTML = list.map((h,i)=>`<div class="panel h-item">
+    <div class="thumb">${thumbHTML(h.thumbnail)}</div>
+    <div class="h-body">
+      <div class="h-title" title="${esc(h.title)}">${esc(h.title)}</div>
+      <div class="h-meta">${siteHTML(siteOf(h.url,h.site))}<span class="tag">${esc(h.quality)}</span><span>${esc(h.date)}</span></div>
+      <div class="h-acts">
+        <button class="btn sm" data-act="open" data-i="${i}">Apri</button>
+        <button class="btn sm icon" title="Mostra nella cartella" data-act="folder" data-i="${i}">${IC.folder}</button>
+        <button class="btn sm icon" title="Scarica di nuovo" data-act="redl" data-i="${i}">${IC.retry}</button>
+      </div>
+    </div></div>`).join("");
+}
+$("#hist").addEventListener("click", e => {
+  const b = e.target.closest("button[data-act]"); if(!b) return;
+  const h = shownHistory[+b.dataset.i]; if(!h) return;
+  const act = b.dataset.act;
+  if(act==="open") api.open_file(h.file).then(ok=>ok||toast("File non trovato: forse è stato spostato","var(--warn)"));
+  else if(act==="folder") api.open_folder(h.folder, h.file);
+  else if(act==="redl") redl(h.url);
+});
+function redl(url){ document.querySelector('.nav[data-view="download"]').click(); $("#url").value=url; syncInput(); analyze(); }
+$("#histSearch").oninput = renderHistory;
+/* conferma nello stile dell'app, al posto del confirm() del browser (che mostra "127.0.0.1 says") */
+function ask(title, text, yesLabel = "Conferma"){
+  return new Promise(resolve => {
+    const box = $("#askBox"), yes = $("#askYes"), no = $("#askNo");
+    $("#askTitle").textContent = title; $("#askText").textContent = text; yes.textContent = yesLabel;
+    const done = v => { box.classList.remove("show"); document.removeEventListener("keydown", onKey); box.onclick = yes.onclick = no.onclick = null; resolve(v); };
+    const onKey = e => { if(e.key === "Escape") done(false); else if(e.key === "Enter"){ e.preventDefault(); done(true); } };
+    yes.onclick = () => done(true); no.onclick = () => done(false);
+    box.onclick = e => { if(e.target === box) done(false); };
+    document.addEventListener("keydown", onKey);
+    box.classList.add("show"); no.focus();
+  });
+}
+$("#clearHistBtn").onclick = async () => {
+  if(!await ask("Svuotare la cronologia?", "Viene cancellato solo l'elenco: i file scaricati restano dove sono.", "Svuota")) return;
+  await api.clear_history(); history=[]; renderHistory(); };
+
+/* ---------- impostazioni ---------- */
+function renderSettings(){
+  $("#setFolder").textContent = settings.folder; $("#setFolder").title = settings.folder;
+  $("#folderLbl").textContent = settings.folder || ""; $("#folderLbl").title = settings.folder || "";
+  $("#setAudio").value = settings.audio_format; $("#setParallel").value = String(settings.parallel);
+  $("#setCookies").value = settings.cookies; $("#setPlaylist").classList.toggle("on", !!settings.playlist);
+  $("#setCookieWhen").value = settings.cookie_when || "auto"; $("#setCookieWhen").disabled = settings.cookies === "none";
+}
+$("#setCookieWhen").onchange = e => save({cookie_when:e.target.value});
+$("#openLogBtn").onclick = () => api.open_log();
+$("#chooseFolderBtn").onclick = async () => { const f = await api.choose_folder(); if(f){ settings.folder=f; renderSettings(); } };
+$("#setAudio").onchange = e => save({audio_format:e.target.value});
+$("#setParallel").onchange = e => save({parallel:+e.target.value});
+$("#setCookies").onchange = e => save({cookies:e.target.value});
+$("#setPlaylist").onclick = () => save({playlist:!settings.playlist});
+$("#updateBtn").onclick = async () => {
+  const b=$("#updateBtn"); b.disabled=true; b.innerHTML='<div class="spin"></div>Aggiornamento';
+  const r = await api.update_ytdlp(); b.disabled=false; b.textContent="Aggiorna";
+  toast(r.ok ? (r.message||"yt-dlp è aggiornato") : (r.error||r.message), r.ok?"var(--ok)":"var(--err)"); loadVersion();
+};
+async function loadVersion(){ const v = await api.version(); $("#verLbl").textContent = v?`yt-dlp ${v}`:"yt-dlp mancante"; $("#setVer").textContent = v?`Versione ${v}`:"Non installato"; }
+
+/* ---------- dati e disinstallazione ---------- */
+let dataInfo = null;
+async function loadDataInfo(){
+  dataInfo = await api.data_info();
+  $("#dataPath").textContent = dataInfo.path; $("#dataPath").title = dataInfo.path;
+  $("#dataSize").textContent = fmtBytes(dataInfo.size);
+}
+$("#openDataBtn").onclick = () => api.open_data_folder();
+$("#uninstallBtn").onclick = async () => {
+  await loadDataInfo();
+  $("#unPath").textContent = dataInfo.path;
+  $("#unExeLi").style.display = dataInfo.exe ? "" : "none";
+  $("#unExe").textContent = dataInfo.exe || "";
+  $("#uninstall").classList.add("show");
+};
+$("#unCancel").onclick = () => $("#uninstall").classList.remove("show");
+$("#unConfirm").onclick = async () => {
+  $("#unConfirm").disabled = true; $("#unConfirm").textContent = "Disinstallo…";
+  const ok = await api.uninstall();       // Python chiede un'ultima conferma con una finestra di Windows
+  if(!ok){ $("#unConfirm").disabled = false; $("#unConfirm").textContent = "Disinstalla"; $("#uninstall").classList.remove("show"); }
+};
+
+/* ---------- eventi dal backend ---------- */
+window.onBackend = (ev, data) => {
+  if(ev==="job"){
+    const prevJob = jobs[data.id], prev = prevJob?.status; jobs[data.id] = data; renderQueue();
+    if(data.warning && !prevJob?.warning) toast(data.warning, "var(--warn)");
+    if(prev!==data.status && data.status==="done") toast("Completato: "+data.title, "var(--ok)");
+    if(prev!==data.status && data.status==="error") toast("Errore: "+data.title, "var(--err)");
+  } else if(ev==="history"){ history = data; if($("#view-history").classList.contains("active")) renderHistory(); }
+  else if(ev==="update"){
+    $("#ubSub").textContent = `Scarico ${data.label}: ${fmtBytes(data.done)}${data.total?" di "+fmtBytes(data.total):""}`;
+  }
+  else if(ev==="setup"){
+    $("#setupBar").style.width = (data.total ? data.done/data.total*100 : 0)+"%";
+    $("#setupLbl").textContent = `${data.label} · ${fmtBytes(data.done)}${data.total?" di "+fmtBytes(data.total):""}`;
+  }
+};
+
+async function ensureDeps(){
+  const d = await api.check_deps();
+  if(d.ytdlp && d.ffmpeg && d.deno) return;
+  $("#setup").classList.add("show"); $("#setupRetry").style.display="none";
+  const r = await api.install_deps();
+  if(r.ok){ $("#setup").classList.remove("show"); toast("Componenti installati", "var(--ok)"); loadVersion(); }
+  else { $("#setupLbl").textContent = "Errore: "+r.error; $("#setupRetry").style.display="inline-flex"; $("#depDot").style.background="var(--err)"; }
+}
+$("#setupRetry").onclick = ensureDeps;
+
+/* ---------- versione di AxGrab e aggiornamenti ---------- */
+let appInfo = {}, pendingUpdate = null;
+// la versione rimandata con "Più tardi" sta nelle impostazioni: il localStorage della finestra
+// non sopravvive alla chiusura dell'app
+const skipped = () => settings.skip_version || "";
+async function checkAppUpdate(manual){
+  const r = await api.check_update();
+  if(!r.ok){ if(manual) toast("Non riesco a controllare gli aggiornamenti: "+r.error, "var(--warn)"); return; }
+  if(!r.update){ $("#updateBanner").hidden = true; if(manual) toast(`Hai già l'ultima versione (${r.current})`, "var(--ok)"); return; }
+  pendingUpdate = r;
+  $("#appVer").textContent = `Versione ${r.current} · disponibile la ${r.latest}`;
+  if(!manual && skipped() === r.latest) return;      // l'utente ha scelto "più tardi" per questa versione
+  $("#ubTitle").textContent = `È disponibile AxGrab ${r.latest}`;
+  $("#ubSub").textContent = r.auto
+    ? `Tu hai la ${r.current}. Con "Aggiorna ora" AxGrab si aggiorna e si riavvia da solo.`
+    : `Tu hai la ${r.current}. Scarica il nuovo AxGrab.exe e sostituisci quello vecchio.`;
+  $("#ubGet").textContent = r.auto ? "Aggiorna ora" : "Scarica";
+  $("#updateBanner").hidden = false;
+}
+$("#ubGet").onclick = async () => {
+  if(!pendingUpdate?.auto){ api.open_url(pendingUpdate?.page || appInfo.repo + "/releases/latest"); return; }
+  const b=$("#ubGet"); b.disabled=true; $("#ubLater").disabled=true; b.innerHTML='<div class="spin"></div>Aggiorno';
+  const r = await api.apply_update();
+  if(r.restarting){ $("#ubTitle").textContent = `Riavvio con AxGrab ${r.version}…`; $("#ubSub").textContent = "Un attimo: la finestra si chiude e si riapre aggiornata."; return; }
+  b.disabled=false; $("#ubLater").disabled=false; b.textContent="Aggiorna ora";
+  if(!r.ok) toast("Aggiornamento non riuscito: " + r.error, "var(--err)");
+};
+$("#ubLater").onclick = () => { $("#updateBanner").hidden = true; save({skip_version: pendingUpdate?.latest || ""}); };
+$("#checkAppBtn").onclick = async () => {
+  const b=$("#checkAppBtn"); b.disabled=true; b.innerHTML='<div class="spin"></div>Controllo';
+  await checkAppUpdate(true); b.disabled=false; b.textContent="Controlla aggiornamenti";
+};
+$("#repoLink").onclick = e => { e.preventDefault(); api.open_url(appInfo.repo); };
+
+async function init(){
+  settings = await api.get_settings(); history = await api.get_history();
+  appInfo = await api.app_info();
+  $("#appVer").textContent = `Versione ${appInfo.version}`; $("#aboutVer").textContent = appInfo.version;
+  renderSettings(); renderOpts(); renderQueue();
+  await ensureDeps(); loadVersion();
+  setTimeout(() => checkAppUpdate(false), 2500);
+}
+
+/* ---------- avvio: pywebview oppure demo nel browser ---------- */
+window.addEventListener("pywebviewready", () => { api = window.pywebview.api; init(); });
+setTimeout(() => { if(!api && !window.pywebview){ api = makeDemoApi(); init(); } }, 700);
+
+function makeDemoApi(){
+  const st = {folder:"C:\\Users\\Tu\\Downloads", mode:"video", quality:"1080", audio_format:"m4a", cookies:"none", playlist:false, parallel:2};
+  const th = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 90"><rect width="160" height="90" fill="#26262c"/><path d="M0 70 L40 45 L70 62 L110 30 L160 58 V90 H0Z" fill="#33333a"/><circle cx="122" cy="22" r="8" fill="#3d3d45"/></svg>');
+  const hist = [{title:"Tramonto in time-lapse sulle Dolomiti", url:"https://youtube.com/watch?v=a", thumbnail:th, site:"Youtube", quality:"1080p", date:"2026-11-11 21:04"},
+                {title:"Ricetta pasta al limone in 60 secondi", url:"https://tiktok.com/@x/video/1", thumbnail:th, site:"TikTok", quality:"M4A", date:"2026-11-10 18:22"}];
+  setTimeout(()=>{
+    const mk=(id,t,s,st,p,q,u,extra={})=>window.onBackend("job",{id,title:t,site:s,status:st,percent:p,quality:q,url:u,thumbnail:th,speed:12.4e6,eta:37,folder:"",...extra});
+    mk("d","Video privato","Facebook","error",30,"720p","https://facebook.com/z",{error:"This video is only available for registered users. Use --cookies-from-browser"});
+    mk("c","Mix lo-fi per studiare","Youtube","done",100,"M4A","https://youtube.com/y",{file:"x"});
+    mk("b","Reel: tour dello studio","Instagram","processing",100,"1080p","https://instagram.com/reel/x");
+    mk("a","Lezione completa di fotografia notturna","Youtube","downloading",64,"2160p","https://youtube.com/x");
+  }, 300);
+  let maxed=false;
+  return {
+    get_settings: async()=>st, save_settings: async p=>Object.assign(st,p), get_history: async()=>hist,
+    check_deps: async()=>({ytdlp:true, ffmpeg:true, deno:true}), version: async()=>"2026.10.26",
+    get_info: async u=>{ await new Promise(r=>setTimeout(r,600)); return {ok:true,title:"Come costruire una piccola casa nel bosco, dall'inizio alla fine",uploader:"Canale Demo",duration:1337,thumbnail:th,site:"Youtube",playlist:false,count:1,heights:[2160,1440,1080,720,480]}; },
+    start_download: async()=>"x", cancel: async()=>1, retry: async()=>1, clear_finished: async()=>1, clear_history: async()=>1,
+    open_file: async()=>true, open_folder: async()=>true, paste: async()=>"", choose_folder: async()=>null, update_ytdlp: async()=>({ok:true,message:"yt-dlp è aggiornato"}),
+    app_info: async()=>({version:"1.0.0", repo:"https://github.com/nonsonoAxel/AxGrab"}),
+    check_update: async()=>({ok:true, update:true, current:"1.0.0", latest:"1.1.0", page:"https://github.com/nonsonoAxel/AxGrab/releases/latest"}),
+    open_url: async()=>1,
+    open_log: async()=>1, data_info: async()=>({path:"C:\\Users\\Tu\\AppData\\Local\\AxGrab", size:187e6, exe:"C:\\Users\\Tu\\Desktop\\AxGrab.exe"}), open_data_folder: async()=>1, uninstall: async()=>1,
+    win_drag: async()=>0, win_resize: async()=>0, win_minimize: async()=>0, win_close: async()=>0, win_toggle_max: async()=>(maxed=!maxed),
+  };
+}
+</script>
+</body>
+</html>
