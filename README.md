@@ -5,7 +5,7 @@
 <h1 align="center">AxGrab</h1>
 
 <p align="center">
-  Scarica video e audio da YouTube, Instagram, TikTok, X, Facebook, Twitch, Reddit e altri 1800+ siti.<br>
+  Scarica video e audio da YouTube, Instagram, TikTok, X, Facebook, Twitch, Reddit e tanti altri siti.<br>
   <b>Creato da <a href="https://github.com/nonsonoAxel">nonsonoAxel</a></b> · un'interfaccia grafica per <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a>
 </p>
 

@@ -497,7 +497,7 @@ const SITES = [
 const siteOf = (url, key="") => { const s=(url+" "+key).toLowerCase(); return SITES.find(x=>s.includes(x.k)) || {n:key||"Web", c:"#9a9aa3"}; };
 document.getElementById("sites").innerHTML = ["YouTube","Instagram","TikTok","X","Facebook","Twitch","Reddit"].map(n=>{
   const s = SITES.find(x=>x.n===n); return `<span class="chip-site"><i style="background:${s.c}"></i>${n}</span>`;
-}).join("") + `<span class="chip-site">+ 1800 siti</span>`;
+}).join("");
 const siteHTML = s => `<span class="site"><i style="background:${s.c}"></i>${esc(s.n)}</span>`;
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const fmtDur = s => { if(!s && s!==0) return ""; s=Math.round(s); const h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60;
