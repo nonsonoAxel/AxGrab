@@ -440,7 +440,7 @@ select{background-color:var(--glass-2);border-color:var(--glass-line);border-rad
         </div>
       </div>
 
-      <div class="about"><img src="logo.png" alt="AxGrab" draggable="false"><span>AxGrab <span id="aboutVer"></span> · creato da Andrea Santarelli · basato su yt-dlp</span>
+      <div class="about"><img src="logo.png" alt="AxGrab" draggable="false"><span>AxGrab <span id="aboutVer"></span> · creato da nonsonoAxel · basato su yt-dlp</span>
         <a href="#" id="repoLink">github.com/nonsonoAxel/AxGrab</a></div>
     </section>
   </main>
@@ -699,6 +699,9 @@ window.onBackend = (ev, data) => {
     if(prev!==data.status && data.status==="done") toast("Completato: "+data.title, "var(--ok)");
     if(prev!==data.status && data.status==="error") toast("Errore: "+data.title, "var(--err)");
   } else if(ev==="history"){ history = data; if($("#view-history").classList.contains("active")) renderHistory(); }
+  else if(ev==="update"){
+    $("#ubSub").textContent = `Scarico ${data.label}: ${fmtBytes(data.done)}${data.total?" di "+fmtBytes(data.total):""}`;
+  }
   else if(ev==="setup"){
     $("#setupBar").style.width = (data.total ? data.done/data.total*100 : 0)+"%";
     $("#setupLbl").textContent = `${data.label} · ${fmtBytes(data.done)}${data.total?" di "+fmtBytes(data.total):""}`;
@@ -726,10 +729,20 @@ async function checkAppUpdate(manual){
   $("#appVer").textContent = `Versione ${r.current} · disponibile la ${r.latest}`;
   if(!manual && skipped() === r.latest) return;      // l'utente ha scelto "più tardi" per questa versione
   $("#ubTitle").textContent = `È disponibile AxGrab ${r.latest}`;
-  $("#ubSub").textContent = `Tu hai la ${r.current}. Scarica il nuovo AxGrab.exe e sostituisci quello vecchio.`;
+  $("#ubSub").textContent = r.auto
+    ? `Tu hai la ${r.current}. Con "Aggiorna ora" AxGrab si aggiorna e si riavvia da solo.`
+    : `Tu hai la ${r.current}. Scarica il nuovo AxGrab.exe e sostituisci quello vecchio.`;
+  $("#ubGet").textContent = r.auto ? "Aggiorna ora" : "Scarica";
   $("#updateBanner").hidden = false;
 }
-$("#ubGet").onclick = () => api.open_url(pendingUpdate?.page || appInfo.repo + "/releases/latest");
+$("#ubGet").onclick = async () => {
+  if(!pendingUpdate?.auto){ api.open_url(pendingUpdate?.page || appInfo.repo + "/releases/latest"); return; }
+  const b=$("#ubGet"); b.disabled=true; $("#ubLater").disabled=true; b.innerHTML='<div class="spin"></div>Aggiorno';
+  const r = await api.apply_update();
+  if(r.restarting){ $("#ubTitle").textContent = `Riavvio con AxGrab ${r.version}…`; $("#ubSub").textContent = "Un attimo: la finestra si chiude e si riapre aggiornata."; return; }
+  b.disabled=false; $("#ubLater").disabled=false; b.textContent="Aggiorna ora";
+  if(!r.ok) toast("Aggiornamento non riuscito: " + r.error, "var(--err)");
+};
 $("#ubLater").onclick = () => { try { localStorage.setItem("axgrab-skip", pendingUpdate?.latest || ""); } catch {} $("#updateBanner").hidden = true; };
 $("#checkAppBtn").onclick = async () => {
   const b=$("#checkAppBtn"); b.disabled=true; b.innerHTML='<div class="spin"></div>Controllo';

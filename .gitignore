@@ -1,0 +1,18 @@
+# ambiente Python locale
+.venv/
+__pycache__/
+*.pyc
+
+# l'EXE si pubblica nelle Releases, non nel codice
+AxGrab.exe
+build/
+dist/
+*.spec
+
+# log personali: contengono i link scaricati
+*.log
+
+# cartella preparata per il caricamento dal sito, copie di prova e note delle release
+da-caricare-su-github/
+prova-aggiornamento/
+note-release-*.md

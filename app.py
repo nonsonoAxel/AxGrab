@@ -1,11 +1,12 @@
-"""
+﻿"""
 AxGrab — GUI leggera per yt-dlp (pywebview + HTML/CSS).
-Creato da Andrea Santarelli.
+Creato da nonsonoAxel · https://github.com/nonsonoAxel/AxGrab
 
 Avvio in sviluppo:  python app.py      Build:  crea-exe.bat
 """
 import ctypes
 import ctypes.wintypes as wt
+import hashlib
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from pathlib import Path
 import webview
 
 APP_NAME = "AxGrab"
-APP_VERSION = "1.0.0"            # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.0.1"            # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxGrab"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -235,7 +236,7 @@ class Api:
                 return str(p)
         return shutil.which(name)
 
-    def _download_file(self, url, dest: Path, label):
+    def _download_file(self, url, dest: Path, label, event="setup"):
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=60) as r:
             total = int(r.headers.get("Content-Length") or 0)
@@ -248,7 +249,7 @@ class Api:
                         break
                     f.write(chunk)
                     done += len(chunk)
-                    self._emit("setup", {"label": label, "done": done, "total": total})
+                    self._emit(event, {"label": label, "done": done, "total": total})
             tmp.replace(dest)
 
     # ---------- dipendenze ----------
@@ -975,12 +976,71 @@ class Api:
             return {"ok": False, "error": str(e)}
         latest = (rel.get("tag_name") or "").lstrip("vV")
         newer = version_tuple(latest) > version_tuple(APP_VERSION)
-        exe = next((a.get("browser_download_url") for a in rel.get("assets") or []
-                    if a.get("name", "").lower().endswith(".exe")), None)
+        asset = next((a for a in rel.get("assets") or []
+                      if a.get("name", "").lower().endswith(".exe")), {})
         log.info("controllo aggiornamenti: attuale %s, ultima %s", APP_VERSION, latest or "—")
         return {"ok": True, "update": newer, "current": APP_VERSION, "latest": latest,
-                "page": rel.get("html_url") or RELEASES_PAGE, "exe": exe,
+                "page": rel.get("html_url") or RELEASES_PAGE, "exe": asset.get("browser_download_url"),
+                "size": asset.get("size"), "digest": asset.get("digest"),
+                "auto": bool(getattr(sys, "frozen", False) and asset),
                 "notes": (rel.get("body") or "")[:600]}
+
+    def apply_update(self):
+        """Scarica il nuovo AxGrab.exe dalla release, lo verifica, sostituisce quello in uso
+        dopo la chiusura e riavvia l'app."""
+        info = self.check_update()
+        if not info.get("ok"):
+            return {"ok": False, "error": info.get("error", "controllo non riuscito")}
+        if not info.get("update"):
+            return {"ok": False, "error": "Hai già l'ultima versione."}
+        url = info.get("exe") or ""
+        if not getattr(sys, "frozen", False) or \
+                not url.startswith(f"https://github.com/{GITHUB_REPO}/releases/download/"):
+            self.open_url(info.get("page") or RELEASES_PAGE)
+            return {"ok": True, "manual": True}
+        exe = Path(sys.executable)
+        new = exe.with_name(exe.stem + ".new.exe")
+        try:
+            try:
+                self._download_file(url, new, f"AxGrab {info['latest']}", event="update")
+            except PermissionError:          # cartella dell'EXE non scrivibile: uso la cartella temporanea
+                new = Path(os.environ.get("TEMP", str(DATA_DIR))) / "AxGrab.new.exe"
+                self._download_file(url, new, f"AxGrab {info['latest']}", event="update")
+            data = new.read_bytes()
+            if len(data) < 1_000_000 or data[:2] != b"MZ":
+                raise ValueError("il file scaricato non è un EXE valido")
+            if info.get("size") and len(data) != info["size"]:
+                raise ValueError("download incompleto")
+            dig = info.get("digest") or ""
+            if dig.startswith("sha256:") and hashlib.sha256(data).hexdigest() != dig[7:].lower():
+                raise ValueError("il file scaricato non corrisponde a quello della release")
+        except Exception as e:
+            new.unlink(missing_ok=True)
+            log.exception("aggiornamento non riuscito")
+            return {"ok": False, "error": str(e)}
+
+        q = lambda s: "'" + str(s).replace("'", "''") + "'"
+        script = "\n".join([
+            f"foreach ($p in @({os.getpid()}, {os.getppid()})) {{",
+            "  while (Get-Process -Id $p -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 300 } }",
+            f"$new = {q(new)}; $exe = {q(exe)}",
+            "for ($i = 0; $i -lt 40; $i++) {",       # l'EXE può restare bloccato qualche istante
+            "  try { Move-Item -LiteralPath $new -Destination $exe -Force -ErrorAction Stop; break }",
+            "  catch { Start-Sleep -Milliseconds 500 } }",
+            "Start-Process -FilePath $exe",
+            "Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force",
+        ])
+        path = Path(os.environ.get("TEMP", str(_LOCAL))) / "axgrab-update.ps1"
+        path.write_text(script, encoding="utf-8-sig")
+        log.info("aggiornamento %s -> %s: riavvio", APP_VERSION, info["latest"])
+        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(path)]
+        base = NO_WINDOW | 0x00000200
+        try:
+            subprocess.Popen(cmd, creationflags=base | 0x01000000, close_fds=True)
+        except OSError:
+            subprocess.Popen(cmd, creationflags=base, close_fds=True)
+        threading.Timer(0.5, self._window.destroy).start()
+        return {"ok": True, "restarting": True, "version": info["latest"]}
 
     def open_url(self, url):
         if isinstance(url, str) and url.startswith("https://github.com/"):

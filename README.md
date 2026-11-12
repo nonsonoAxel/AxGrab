@@ -6,7 +6,7 @@
 
 <p align="center">
   Scarica video e audio da YouTube, Instagram, TikTok, X, Facebook, Twitch, Reddit e altri 1800+ siti.<br>
-  <b>Creato da nonsonoAxel</b> · un'interfaccia grafica per <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a>
+  <b>Creato da <a href="https://github.com/nonsonoAxel">nonsonoAxel</a></b> · un'interfaccia grafica per <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a>
 </p>
 
 <p align="center">
@@ -75,7 +75,7 @@ elimina quella cartella, l'EXE e i suoi collegamenti. I video scaricati non veng
 4. Se hai modificato il codice, caricalo anche nel repository (*Add file → Upload files*).
 
 ## Licenza
-[MIT](LICENSE) © 2026 Andrea Santarelli. AxGrab scarica e usa [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+[MIT](LICENSE) © 2026 nonsonoAxel. AxGrab scarica e usa [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 (Unlicense), [FFmpeg](https://ffmpeg.org) (GPL) e [Deno](https://deno.com) (MIT), che restano dei rispettivi autori.
 
 Usa AxGrab solo per contenuti che hai il diritto di scaricare.
