@@ -1,4 +1,4 @@
-﻿"""
+"""
 AxGrab — GUI leggera per yt-dlp (pywebview + HTML/CSS).
 Creato da nonsonoAxel · https://github.com/nonsonoAxel/AxGrab
 
@@ -26,7 +26,7 @@ from pathlib import Path
 import webview
 
 APP_NAME = "AxGrab"
-APP_VERSION = "1.0.1"            # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.0.2"            # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxGrab"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -171,6 +171,16 @@ def is_auth_error(msg: str) -> bool:
     """L'errore fa pensare che servisse il login (quindi i cookie)."""
     m = (msg or "").lower()
     return any(k in m for k in AUTH_ERRORS)
+
+
+def independent_env():
+    """Ambiente per avviare un'altra copia di AxGrab: senza le variabili che il bootloader di
+    PyInstaller imposta per l'istanza in corso (altrimenti la nuova cerca la cartella _MEI della
+    vecchia, già cancellata, e fallisce con 'Failed to load Python DLL')."""
+    env = {k: v for k, v in os.environ.items()
+           if not k.upper().startswith(("_PYI_", "_MEIPASS", "_PYIBOOT"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
 
 
 def version_tuple(v: str):
@@ -1035,10 +1045,11 @@ class Api:
         log.info("aggiornamento %s -> %s: riavvio", APP_VERSION, info["latest"])
         cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(path)]
         base = NO_WINDOW | 0x00000200
+        env = independent_env()          # la nuova AxGrab non deve ereditare lo stato di questa
         try:
-            subprocess.Popen(cmd, creationflags=base | 0x01000000, close_fds=True)
+            subprocess.Popen(cmd, creationflags=base | 0x01000000, close_fds=True, env=env)
         except OSError:
-            subprocess.Popen(cmd, creationflags=base, close_fds=True)
+            subprocess.Popen(cmd, creationflags=base, close_fds=True, env=env)
         threading.Timer(0.5, self._window.destroy).start()
         return {"ok": True, "restarting": True, "version": info["latest"]}
 
