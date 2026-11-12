@@ -475,6 +475,16 @@ select{background-color:var(--glass-2);border-color:var(--glass-line);border-rad
     </div>
   </div>
 </div>
+<div class="overlay" id="askBox">
+  <div class="panel modal" role="dialog" aria-modal="true" aria-labelledby="askTitle">
+    <h3 id="askTitle"></h3>
+    <p id="askText" style="margin-bottom:18px"></p>
+    <div class="acts">
+      <button class="btn sm" id="askNo">Annulla</button>
+      <button class="btn sm danger solid" id="askYes">Conferma</button>
+    </div>
+  </div>
+</div>
 <div class="toasts" id="toasts"></div>
 
 <script>
@@ -670,7 +680,21 @@ $("#hist").addEventListener("click", e => {
 });
 function redl(url){ document.querySelector('.nav[data-view="download"]').click(); $("#url").value=url; syncInput(); analyze(); }
 $("#histSearch").oninput = renderHistory;
-$("#clearHistBtn").onclick = async () => { if(!confirm("Svuotare la cronologia? I file scaricati non vengono toccati.")) return;
+/* conferma nello stile dell'app, al posto del confirm() del browser (che mostra "127.0.0.1 says") */
+function ask(title, text, yesLabel = "Conferma"){
+  return new Promise(resolve => {
+    const box = $("#askBox"), yes = $("#askYes"), no = $("#askNo");
+    $("#askTitle").textContent = title; $("#askText").textContent = text; yes.textContent = yesLabel;
+    const done = v => { box.classList.remove("show"); document.removeEventListener("keydown", onKey); box.onclick = yes.onclick = no.onclick = null; resolve(v); };
+    const onKey = e => { if(e.key === "Escape") done(false); else if(e.key === "Enter"){ e.preventDefault(); done(true); } };
+    yes.onclick = () => done(true); no.onclick = () => done(false);
+    box.onclick = e => { if(e.target === box) done(false); };
+    document.addEventListener("keydown", onKey);
+    box.classList.add("show"); no.focus();
+  });
+}
+$("#clearHistBtn").onclick = async () => {
+  if(!await ask("Svuotare la cronologia?", "Viene cancellato solo l'elenco: i file scaricati restano dove sono.", "Svuota")) return;
   await api.clear_history(); history=[]; renderHistory(); };
 
 /* ---------- impostazioni ---------- */

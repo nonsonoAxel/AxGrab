@@ -23,6 +23,15 @@ if errorlevel 1 (
   exit /b 1
 )
 rem firma dell'EXE: senza AxGrab.exe.sig nella release, le app installate rifiutano l'aggiornamento
+rem la chiave privata si cerca sul Desktop (chiave-privata.txt), dove la metti solo per compilare;
+rem in alternativa vale la variabile AXGRAB_CHIAVE o la cartella %USERPROFILE%\.axgrab-firma
+set "CHIAVE_DESKTOP="
+for /f "usebackq delims=" %%D in (`powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')"`) do set "DESKTOP=%%D"
+if not defined AXGRAB_CHIAVE if exist "%DESKTOP%\chiave-privata.txt" (
+  set "AXGRAB_CHIAVE=%DESKTOP%\chiave-privata.txt"
+  set "CHIAVE_DESKTOP=1"
+  echo Uso la chiave sul Desktop: %DESKTOP%\chiave-privata.txt
+)
 ".venv\Scripts\python.exe" firma.py AxGrab.exe
 if errorlevel 1 (
   echo.
@@ -32,4 +41,8 @@ if errorlevel 1 (
 )
 echo.
 echo Fatto! Carica nella release sia AxGrab.exe sia AxGrab.exe.sig.
+if defined CHIAVE_DESKTOP (
+  echo.
+  echo RICORDA: ora togli chiave-privata.txt dal Desktop.
+)
 pause
