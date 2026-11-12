@@ -6,7 +6,7 @@
 
 <p align="center">
   Scarica video e audio da YouTube, Instagram, TikTok, X, Facebook, Twitch, Reddit e altri 1800+ siti.<br>
-  <b>Creato da Andrea Santarelli</b> · un'interfaccia grafica per <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a>
+  <b>Creato da nonsonoAxel</b> · un'interfaccia grafica per <a href="https://github.com/yt-dlp/yt-dlp">yt-dlp</a>
 </p>
 
 <p align="center">
