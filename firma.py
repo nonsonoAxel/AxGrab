@@ -167,7 +167,9 @@ KEY_FILE = Path(os.environ.get("AXGRAB_CHIAVE") or Path.home() / ".axgrab-firma"
 
 def _load_secret() -> bytes:
     if not KEY_FILE.is_file():
-        sys.exit(f"Chiave privata non trovata in {KEY_FILE}\nCreala con:  python firma.py nuova-chiave")
+        sys.exit(f"Chiave privata non trovata ({KEY_FILE}).\n"
+                 "Metti la tua chiave-privata.txt sul Desktop e rilancia crea-exe.bat.\n"
+                 "NON crearne una nuova: le copie di AxGrab già installate rifiuterebbero gli aggiornamenti.")
     try:
         secret = bytes.fromhex(KEY_FILE.read_text(encoding="ascii").strip())
     except ValueError:

@@ -30,7 +30,7 @@ import webview
 import firma
 
 APP_NAME = "AxGrab"
-APP_VERSION = "1.0.4"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.0.5"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxGrab"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -50,32 +50,6 @@ TASKKILL = os.path.join(_WINDIR, "System32", "taskkill.exe")
 EXPLORER = os.path.join(_WINDIR, "explorer.exe")
 
 
-def _migrate_old_data():
-    """Porta impostazioni e cronologia dal vecchio nome (Grabby). Solo se la cartella è davvero
-    della vecchia app (contiene grabby.log) e senza toccare file che non le appartengono:
-    i programmi in bin non si copiano, vengono riscaricati."""
-    old = _LOCAL / "Grabby"
-    try:
-        if not old.is_dir() or old.is_symlink() or old.is_junction() or not (old / "grabby.log").is_file():
-            return
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        for name in ("settings.json", "history.json"):
-            item, target = old / name, DATA_DIR / name
-            if item.is_file() and not target.exists():
-                os.replace(item, target)
-        for name in ("settings.json", "history.json", "grabby.log", "cookies.txt", "cookies.json",
-                     "siti-con-cookie.json"):
-            (old / name).unlink(missing_ok=True)
-        for name in ("bin", "cache"):
-            sub = old / name
-            if sub.is_dir() and not sub.is_symlink() and not sub.is_junction():
-                shutil.rmtree(sub, ignore_errors=True)
-        old.rmdir()                # riesce solo se non è rimasto nient'altro
-    except OSError:
-        pass
-
-
-_migrate_old_data()
 BIN_DIR = DATA_DIR / "bin"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 HISTORY_FILE = DATA_DIR / "history.json"
@@ -98,7 +72,6 @@ YTDLP_DIR = BIN_DIR / "yt-dlp"
 FFMPEG_DIR = BIN_DIR / "ffmpeg"
 OWN_EXE = {"yt-dlp": YTDLP_DIR / "yt-dlp.exe", "ffmpeg": FFMPEG_DIR / "ffmpeg.exe",
            "deno": BIN_DIR / "deno.exe"}
-LEGACY_FILES = ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe")   # versioni a file singolo, più pesanti
 
 # copia dei cookie dei soli siti video: evita di rileggere (e decifrare) il browser a ogni
 # analisi e permette di usarli anche quando un browser Chromium è aperto e blocca il suo file.
@@ -327,6 +300,15 @@ def num(v):
         return None
 
 
+def unjson(text):
+    """Titoli e percorsi arrivano da yt-dlp in JSON (una riga sola anche con "a capo" dentro)."""
+    try:
+        v = json.loads(text)
+        return v if isinstance(v, str) else text
+    except ValueError:
+        return text
+
+
 class Api:
     def __init__(self):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -525,9 +507,6 @@ class Api:
                                   DENO_SUMS)
                 os.replace(BIN_DIR / "deno-dir" / "deno.exe", OWN_EXE["deno"])
                 shutil.rmtree(BIN_DIR / "deno-dir", ignore_errors=True)
-            # versioni precedenti, più pesanti: non servono più
-            for old in LEGACY_FILES:
-                (BIN_DIR / old).unlink(missing_ok=True)
             log.info("install_deps completato in %.1fs, componenti: %.0f MB",
                      time.time() - t0, dir_size(BIN_DIR) / 2**20)
             return {"ok": True, **self.check_deps()}
@@ -766,11 +745,41 @@ class Api:
             return True                       # browser illeggibile: usa la copia salvata
         return is_auth_error(err)             # senza cookie serviva il login: prova con
 
-    def _extend_plan(self, plan, i, used, err):
-        """Se la lettura dal browser fallisce (es. Helium aperto) e c'è una copia salvata,
-        il tentativo successivo usa quella."""
-        if used is True and is_cookie_error(err) and COOKIE_FILE.exists() and "saved" not in plan:
-            plan.insert(i + 1, "saved")
+    def _attempts(self, url, run, first=None, cancelled=lambda: False, on_warning=lambda w: None):
+        """Esegue run(cookies, info_file) -> (ok, errore) seguendo il piano dei cookie, per l'analisi
+        e per il download. first: tentativo iniziale con l'analisi salvata (cookies, file).
+        Restituisce (ok, ultimo errore, cookie del tentativo riuscito/ultimo, cookie provati)."""
+        attempts = ([first] if first else []) + [(c, None) for c in self._cookie_plan(url)]
+        ok, err, why, i = False, "", "", 0
+        while i < len(attempts):
+            cookies, info_file = attempts[i]
+            if i:
+                if cancelled():
+                    i -= 1
+                    break
+                prev_cookies, prev_file = attempts[i - 1]
+                # dopo un tentativo dall'analisi salvata si riprova sempre; altrimenti si segue la
+                # regola dei cookie
+                if not prev_file and not self._should_retry(prev_cookies, cookies, why):
+                    i -= 1
+                    break
+                if prev_cookies and not cookies:
+                    on_warning(self._cookie_warning(why))
+            ok, err = run(cookies, info_file)
+            if ok:
+                break
+            # per decidere se serviva il login si guarda il messaggio senza il link: parole come
+            # "login" o "account" dentro il link stesso non devono far leggere i cookie
+            why = err.replace(url, "")
+            if not cookies and is_auth_error(why) and self._cookie_spec():
+                self._remember_needs_cookies(url)     # la prossima volta cookie subito
+            # browser illeggibile (es. Helium aperto) ma c'è una copia salvata: si prova con quella
+            if cookies is True and is_cookie_error(why) and COOKIE_FILE.exists() and \
+                    not any(c == "saved" for c, _ in attempts):
+                attempts.insert(i + 1, ("saved", None))
+            i += 1
+        last = attempts[min(i, len(attempts) - 1)]
+        return ok, err, last[0], any(c for c, _ in attempts[:i + 1])
 
     def _friendly(self, err, tried_cookies):
         """Messaggio comprensibile al posto dell'errore tecnico di yt-dlp."""
@@ -790,7 +799,7 @@ class Api:
         if "requested format is not available" in e:
             return "La qualità scelta non è disponibile per questo video: prova con Max."
         if any(k in e for k in ("private", "login required", "log in", "sign in", "requiring login",
-                                "unreachable", "need to log in")):
+                                "unreachable", "need to log in", "logged-in")):
             return ("Il contenuto richiede l'accesso. In Impostazioni → Cookie dal browser scegli il browser "
                     "in cui hai fatto l'accesso a quel sito." if not tried_cookies else
                     f"Il contenuto richiede l'accesso: controlla di averlo fatto in {b} con un account che può vederlo.")
@@ -808,18 +817,14 @@ class Api:
         exe = self._exe("yt-dlp")
         if not exe:
             return {"ok": False, "error": "yt-dlp non installato"}
-        warning = None
-        plan = self._cookie_plan(url)
-        site = url_host(url)
-        i = 0
-        while i < len(plan):
-            use_cookies = plan[i]
+        site, warnings, result = url_host(url), [], {}
+
+        def run(use_cookies, _info_file):
             tmp = self._new_cookie_tmp() if use_cookies else None
-            args = [exe, *self._base_args(use_cookies, tmp), "-J", "--flat-playlist"]
-            args.append("--yes-playlist" if self.settings["playlist"] else "--no-playlist")
-            args += ["--", url]       # dopo "--" yt-dlp non legge più opzioni: il link resta un link
-            t0 = time.time()
-            proc = None
+            args = [exe, *self._base_args(use_cookies, tmp), "-J", "--flat-playlist",
+                    "--yes-playlist" if self.settings["playlist"] else "--no-playlist",
+                    "--", url]       # dopo "--" yt-dlp non legge più opzioni: il link resta un link
+            t0, proc = time.time(), None
             try:
                 proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                         encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
@@ -830,31 +835,26 @@ class Api:
                     self._kill(proc)
                     proc.communicate()
                     log.warning("analisi: timeout dopo 90s (cookie=%s) %s", use_cookies, site)
-                    return {"ok": False, "error": "L'analisi ha impiegato troppo (oltre 90 secondi). Riprova."}
+                    raise
             finally:
                 self._procs.discard(proc)
                 if tmp:
                     self._store_cookies(tmp)
-            ok = proc.returncode == 0 and stdout.strip()
+            ok = proc.returncode == 0 and bool(stdout.strip())
             err = [l for l in stderr.splitlines() if "ERROR" in l]
             err = (err[-1] if err else stderr.strip()[-300:]) or "Errore sconosciuto"
-            # per decidere se serviva il login si guarda il messaggio senza il link: parole come
-            # "login" o "account" dentro il link stesso non devono far leggere i cookie
-            why = err.replace(url, "")
-            log.info("analisi %.1fs cookie=%s ok=%s %s%s", time.time() - t0, use_cookies, bool(ok), site,
-                     "" if ok else " | " + log_safe(why))
-            if ok:
-                break
-            if not use_cookies and is_auth_error(why) and self._cookie_spec():
-                self._remember_needs_cookies(url)     # la prossima volta cookie subito
-            self._extend_plan(plan, i, use_cookies, why)
-            nxt = plan[i + 1] if i + 1 < len(plan) else None
-            if nxt is not None and self._should_retry(use_cookies, nxt, why):
-                if use_cookies and not nxt:
-                    warning = self._cookie_warning(why)
-                i += 1
-                continue
-            return {"ok": False, "error": self._friendly(err, any(plan[:i + 1])), "detail": err}
+            log.info("analisi %.1fs cookie=%s ok=%s %s%s", time.time() - t0, use_cookies, ok, site,
+                     "" if ok else " | " + log_safe(err.replace(url, "")))
+            result["stdout"] = stdout
+            return ok, err
+
+        try:
+            ok, err, use_cookies, tried = self._attempts(url, run, on_warning=warnings.append)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "L'analisi ha impiegato troppo (oltre 90 secondi). Riprova."}
+        if not ok:
+            return {"ok": False, "error": self._friendly(err, tried), "detail": err}
+        warning, stdout = (warnings[-1] if warnings else None), result["stdout"]
         try:
             d = json.loads(stdout)
         except ValueError:
@@ -932,41 +932,22 @@ class Api:
                 return
             try:
                 Path(opts["folder"]).mkdir(parents=True, exist_ok=True)
+                # primo tentativo: l'analisi già fatta (con lo stesso uso dei cookie), poi il piano dei cookie
                 cached = self._take_cache(job["url"])
-                # tentativi: analisi già fatta (con lo stesso uso dei cookie) -> piano dei cookie
-                attempts = ([(cached[1], cached[0])] if cached else [])
-                attempts += [(c, None) for c in self._cookie_plan(job["url"])]
-                code, err, why = 1, "", ""     # why: l'errore senza il link (vedi get_info)
                 t0 = time.time()
-                i = 0
-                while i < len(attempts):
-                    cookies, info_file = attempts[i]
-                    if i and job["cancel"]:
-                        break
-                    if i:
-                        prev_cookies, prev_file = attempts[i - 1]
-                        # dopo un tentativo dall'analisi salvata si riprova sempre; altrimenti
-                        # si segue la regola dei cookie
-                        if not prev_file and not self._should_retry(prev_cookies, cookies, why):
-                            break
-                        if prev_cookies and not cookies:
-                            job["warning"] = self._cookie_warning(why)
-                    job["percent"] = 0
-                    ta = time.time()
+
+                def run(cookies, info_file):
+                    job["percent"], ta = 0, time.time()
                     code, err = self._run_proc(job, opts, cookies, info_file)
-                    why = err.replace(job["url"], "")
-                    log.info("download tentativo %d (cookie=%s, analisi salvata=%s): codice %s, %.1fs%s",
-                             i + 1, cookies, bool(info_file), code, time.time() - ta,
-                             "" if code == 0 else " | " + log_safe(why))
-                    if code == 0:
-                        break
-                    if not cookies and is_auth_error(why) and self._cookie_spec():
-                        self._remember_needs_cookies(job["url"])
-                    if cookies is True and is_cookie_error(why) and COOKIE_FILE.exists() and \
-                            not any(c == "saved" for c, _ in attempts):
-                        attempts.insert(i + 1, ("saved", None))
-                    i += 1
-                if code == 0 and job.get("file") and os.path.exists(job["file"]):
+                    log.info("download (cookie=%s, analisi salvata=%s): codice %s, %.1fs%s", cookies,
+                             bool(info_file), code, time.time() - ta,
+                             "" if code == 0 else " | " + log_safe(err.replace(job["url"], "")))
+                    return code == 0, err or f"yt-dlp ha restituito codice {code}"
+
+                ok, err, _, tried = self._attempts(
+                    job["url"], run, first=(cached[1], cached[0]) if cached else None,
+                    cancelled=lambda: job["cancel"], on_warning=lambda w: job.update(warning=w))
+                if ok and job.get("file") and os.path.exists(job["file"]):
                     mb = os.path.getsize(job["file"]) / 2**20
                     secs = time.time() - t0
                     log.info("completato %.1f MB in %.1fs (media %.1f MB/s, %s %s) %s", mb, secs,
@@ -975,14 +956,11 @@ class Api:
                     cached[0].unlink(missing_ok=True)
                 if job["cancel"]:
                     job["status"] = "cancelled"
-                elif code == 0:
+                elif ok:
                     job["status"], job["percent"] = "done", 100
                     self._add_history(job)
                 else:
-                    job["status"] = "error"
-                    raw = err or f"yt-dlp ha restituito codice {code}"
-                    job["error"] = self._friendly(raw, any(c for c, _ in attempts))
-                    job["detail"] = raw
+                    job.update(status="error", error=self._friendly(err, tried), detail=err)
             except Exception as e:
                 job["status"], job["error"] = "error", str(e)
             job["proc"] = None
@@ -997,18 +975,17 @@ class Api:
 
     def _run_proc(self, job, opts, cookies, info_file=None):
         """Esegue yt-dlp una volta; restituisce (codice di uscita, ultimo errore)."""
-        exe = self._exe("yt-dlp")
-        # "--" chiude le opzioni: quello che segue è sempre trattato come link
-        source = ["--load-info-json", str(info_file)] if info_file else ["--", job["url"]]
         tmp = self._new_cookie_tmp() if cookies else None
         try:
-            return self._run_proc_inner(job, opts, exe, source, cookies, tmp)
+            return self._download_once(job, opts, cookies, info_file, tmp)
         finally:
             if tmp:
                 self._store_cookies(tmp)
 
-    def _run_proc_inner(self, job, opts, exe, source, cookies, tmp):
-        args = [exe, *self._base_args(cookies, tmp), *self._format_args(opts),
+    def _download_once(self, job, opts, cookies, info_file, tmp):
+        # "--" chiude le opzioni: quello che segue è sempre trattato come link
+        source = ["--load-info-json", str(info_file)] if info_file else ["--", job["url"]]
+        args = [self._exe("yt-dlp"), *self._base_args(cookies, tmp), *self._format_args(opts),
                 "-N", "4",   # frammenti in parallelo (HLS/DASH: Instagram, TikTok, Twitch, X…)
                 "--yes-playlist" if opts["playlist"] else "--no-playlist",
                 "-P", opts["folder"],
@@ -1031,14 +1008,6 @@ class Api:
                                 text=True, encoding="utf-8", errors="replace",
                                 creationflags=NO_WINDOW, bufsize=1)
         job["proc"] = proc
-
-        def unjson(text):
-            try:
-                v = json.loads(text)
-                return v if isinstance(v, str) else text
-            except ValueError:
-                return text
-
         for line in proc.stdout:
             line = line.rstrip()
             if line.startswith("@@P|"):
@@ -1267,14 +1236,7 @@ class Api:
 
     # ---------- dati e disinstallazione ----------
     def data_info(self):
-        size = 0
-        for root, _, files in os.walk(DATA_DIR):
-            for f in files:
-                try:
-                    size += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
-        return {"path": str(DATA_DIR), "size": size,
+        return {"path": str(DATA_DIR), "size": dir_size(DATA_DIR),
                 "exe": sys.executable if getattr(sys, "frozen", False) else None}
 
     def open_data_folder(self):
