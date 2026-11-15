@@ -23,14 +23,15 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import webview
 
 import firma
+import trascrizione
 
 APP_NAME = "AxGrab"
-APP_VERSION = "1.0.7"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.1.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxGrab"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -72,6 +73,12 @@ YTDLP_DIR = BIN_DIR / "yt-dlp"
 FFMPEG_DIR = BIN_DIR / "ffmpeg"
 OWN_EXE = {"yt-dlp": YTDLP_DIR / "yt-dlp.exe", "ffmpeg": FFMPEG_DIR / "ffmpeg.exe",
            "deno": BIN_DIR / "deno.exe"}
+# trascrizione: motore e modelli si scaricano solo se qualcuno la usa
+WHISPER_DIR = BIN_DIR / "whisper"
+WHISPER_EXE = WHISPER_DIR / "whisper-cli.exe"
+WHISPER_GPU_DIR = BIN_DIR / "whisper-cuda"          # facoltativo: solo per chi ha una scheda NVIDIA
+WHISPER_GPU_EXE = WHISPER_GPU_DIR / "whisper-cli.exe"
+MODELS_DIR = DATA_DIR / "modelli"
 
 # copia dei cookie dei soli siti video: evita di rileggere (e decifrare) il browser a ogni
 # analisi e permette di usarli anche quando un browser Chromium è aperto e blocca il suo file.
@@ -110,7 +117,7 @@ log = logging.getLogger(APP_NAME)
 
 DEFAULT_SETTINGS = {
     "folder": str(Path.home() / "Downloads"),
-    "mode": "video",          # video | audio | thumb (solo la miniatura, in JPG)
+    "mode": "video",          # video | audio | thumb (solo la miniatura, in JPG) | text (trascrizione)
     "quality": "1080",        # best | 2160 | 1440 | 1080 | 720 | 480
     "audio_format": "mp3",    # mp3 | m4a
     "cookies": "none",        # none | firefox | zen | helium | chrome | edge | brave
@@ -118,10 +125,15 @@ DEFAULT_SETTINGS = {
     "playlist": False,
     "parallel": 2,
     "skip_version": "",       # aggiornamento rimandato con "Più tardi"
+    "whisper_model": "",      # file del modello scelto per la trascrizione (in MODELS_DIR)
+    "whisper_lang": "auto",   # lingua dell'audio: auto | it | en | ...
+    "whisper_gpu": False,     # trascrizione sulla scheda NVIDIA (se il motore CUDA è scaricato)
 }
 # valori ammessi: tutto il resto (da settings.json o dall'interfaccia) viene scartato
 ALLOWED_SETTINGS = {
-    "mode": ("video", "audio", "thumb"),
+    "mode": ("video", "audio", "thumb", "text"),
+    "whisper_model": ("", *trascrizione.model_files()),
+    "whisper_lang": trascrizione.LANGUAGES,
     "quality": ("best", "2160", "1440", "1080", "720", "480"),
     "audio_format": ("mp3", "m4a"),
     "cookies": ("none", "firefox", "zen", "helium", "chrome", "edge", "brave"),
@@ -132,7 +144,7 @@ URL_RE = re.compile(r"https?://[^\s\"<>]+\Z", re.I)
 # "Apri" avvia solo file di questo tipo, mai programmi o script
 MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v", ".3gp", ".gif",
              ".m4a", ".mp3", ".opus", ".ogg", ".oga", ".flac", ".wav", ".aac", ".weba", ".mka",
-             ".jpg", ".jpeg", ".png", ".webp"}
+             ".jpg", ".jpeg", ".png", ".webp", ".txt", ".srt"}
 
 
 def valid_url(url) -> bool:
@@ -164,8 +176,9 @@ def clean_settings(data) -> dict:
             v = int(v)
         if type(v) in (str, int) and v in allowed:
             out[key] = v
-    if isinstance(data.get("playlist"), bool):
-        out["playlist"] = data["playlist"]
+    for key in ("playlist", "whisper_gpu"):
+        if isinstance(data.get(key), bool):
+            out[key] = data[key]
     folder = data.get("folder")
     if isinstance(folder, str) and 0 < len(folder) < 1000 and os.path.isabs(folder):
         out["folder"] = folder
@@ -274,6 +287,18 @@ def independent_env():
     return env
 
 
+def short_path(p) -> str:
+    """Percorso 8.3 di Windows (solo lettere semplici) per i programmi che non gestiscono i nomi
+    con caratteri speciali; se non è disponibile resta quello normale."""
+    p = str(p)
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        n = ctypes.windll.kernel32.GetShortPathNameW(p, buf, 32768)
+        return buf.value if 0 < n < 32768 else p
+    except Exception:
+        return p
+
+
 def version_tuple(v: str):
     """'1.10.2' -> (1, 10, 2): confronto corretto anche con numeri a più cifre."""
     out = []
@@ -328,6 +353,8 @@ class Api:
             pass
         self._info_cache = {}
         self._cookie_reads = set()      # file temporanei in cui yt-dlp sta leggendo dal browser
+        self._scan = []                 # modelli Whisper trovati sul PC dall'ultima ricerca
+        self._last_code = None          # codice d'uscita dell'ultimo whisper-cli, per il log
         self._procs = set()             # yt-dlp in esecuzione: vanno fermati alla chiusura
         self._needs_cookies = {k: v for k, v in load_json(NEEDS_COOKIES_FILE, {}).items()
                                if isinstance(v, (int, float))}
@@ -437,35 +464,31 @@ class Api:
         log.info("check_deps: %s", have)
         return {"ytdlp": have["yt-dlp"], "ffmpeg": have["ffmpeg"], "deno": have["deno"]}
 
-    def _install_zip(self, url, label, dest: Path, keep, sums_url=None):
+    def _install_zip(self, url, label, dest: Path, keep, sums_url=None, expected_sha=None, event="setup"):
         """Scarica uno zip ed estrae in dest i file per cui keep(percorso_nello_zip) restituisce
         il percorso relativo di destinazione (o None per scartarlo). Sostituisce dest solo a fine lavoro.
         Se sums_url è indicato, lo zip deve corrispondere all'impronta SHA-256 pubblicata lì."""
         zpath = BIN_DIR / f"{dest.name}.zip"
-        self._download_file(url, zpath, label)
-        if sums_url:
-            expected = self._expected_sha256(sums_url, url.rsplit("/", 1)[-1])
-            if expected:
-                h = hashlib.sha256()
-                with open(zpath, "rb") as f:
-                    for chunk in iter(lambda: f.read(1 << 20), b""):
-                        h.update(chunk)
-                if h.hexdigest() != expected:
-                    zpath.unlink(missing_ok=True)
-                    raise ValueError(f"{label}: il file scaricato è rovinato o non è quello pubblicato. Riprova.")
+        self._download_file(url, zpath, label, event=event)
+        expected = expected_sha or (self._expected_sha256(sums_url, url.rsplit("/", 1)[-1]) if sums_url else None)
+        if expected and trascrizione.sha256_file(zpath) != expected.lower():
+            zpath.unlink(missing_ok=True)
+            raise ValueError(f"{label}: il file scaricato è rovinato o non è quello pubblicato. Riprova.")
         self._emit("setup", {"label": f"Estrazione {label}", "done": 1, "total": 1})
         tmp = dest.with_name(dest.name + ".new")
         shutil.rmtree(tmp, ignore_errors=True)
-        root = tmp.resolve()
         with zipfile.ZipFile(zpath) as z:
             for m in z.infolist():
                 if m.is_dir():
                     continue
                 rel = keep(m.filename)
                 if rel:
-                    out = (tmp / rel).resolve()
-                    if not out.is_relative_to(root):      # es. "_internal/../../altro": fuori dalla cartella
+                    # il percorso nello zip non può uscire dalla cartella: niente "..", niente percorsi
+                    # assoluti o con lettera di unità (es. "_internal/../../altro", "C:/Windows/...")
+                    relp = PureWindowsPath(rel)
+                    if relp.is_absolute() or relp.drive or relp.root or ".." in relp.parts or not relp.parts:
                         raise ValueError(f"{label}: percorso non valido nello zip ({m.filename})")
+                    out = tmp / relp
                     out.parent.mkdir(parents=True, exist_ok=True)
                     with z.open(m) as src, open(out, "wb") as dst:
                         shutil.copyfileobj(src, dst)
@@ -893,6 +916,8 @@ class Api:
 
     # ---------- download ----------
     def _format_args(self, opts):
+        if opts["mode"] == "text":
+            return ["-f", "ba/b"]            # solo l'audio: poi lo trascrive Whisper
         if opts["mode"] == "thumb":
             # solo la miniatura alla massima risoluzione, convertita in JPG: nessun video scaricato
             return ["--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg"]
@@ -916,7 +941,7 @@ class Api:
             "thumbnail": thumb if valid_url(thumb) else None,
             "site": site[:40] if isinstance(site, str) else "",
             "mode": opts["mode"],
-            "quality": "JPG" if opts["mode"] == "thumb" else
+            "quality": "Testo" if opts["mode"] == "text" else "JPG" if opts["mode"] == "thumb" else
                        opts["audio_format"].upper() if opts["mode"] == "audio" else
                        ("Max" if opts["quality"] == "best" else opts["quality"] + "p"),
             "folder": opts["folder"], "file": None, "proc": None, "cancel": False,
@@ -935,8 +960,16 @@ class Api:
         with self._slots:
             if job["cancel"]:
                 return
+            text_dir = None
             try:
                 Path(opts["folder"]).mkdir(parents=True, exist_ok=True)
+                if opts["mode"] == "text":
+                    model = self._whisper_model_path()
+                    if not model:
+                        raise RuntimeError("Per la trascrizione scegli prima un modello: Impostazioni → Trascrizione.")
+                    # l'audio va in una cartella temporanea: nella cartella dei download finisce solo il testo
+                    text_dir = CACHE_DIR / f"tr-{job['id']}"
+                    opts = {**opts, "playlist": False, "final_folder": opts["folder"], "folder": str(text_dir)}
                 # primo tentativo: l'analisi già fatta (con lo stesso uso dei cookie), poi il piano dei cookie
                 cached = self._take_cache(job["url"])
                 t0 = time.time()
@@ -959,6 +992,11 @@ class Api:
                              mb / max(secs, 0.1), opts["mode"], job["quality"], url_host(job["url"]))
                 if cached:
                     cached[0].unlink(missing_ok=True)
+                if ok and opts["mode"] == "text" and not job["cancel"]:
+                    audio = Path(job.get("file") or "")
+                    out_base = Path(opts["final_folder"]) / (audio.stem or "trascrizione")
+                    ok, err = self._transcribe(job, audio, out_base)
+                    tried = None              # l'errore, se c'è, è già un messaggio in italiano
                 if job["cancel"]:
                     job["status"] = "cancelled"
                 elif ok and opts["mode"] == "thumb" and not (job.get("file") and os.path.isfile(job["file"])):
@@ -967,11 +1005,325 @@ class Api:
                     job["status"], job["percent"] = "done", 100
                     self._add_history(job)
                 else:
-                    job.update(status="error", error=self._friendly(err, tried), detail=err)
+                    job.update(status="error", error=err if tried is None else self._friendly(err, tried),
+                               detail=err)
             except Exception as e:
                 job["status"], job["error"] = "error", str(e)
+            finally:
+                if text_dir:
+                    shutil.rmtree(text_dir, ignore_errors=True)    # audio temporaneo della trascrizione
             job["proc"] = None
             self._emit("job", self._public(job))
+
+    # ---------- trascrizione (Whisper) ----------
+    def _whisper_model_path(self):
+        """Il modello scelto, solo se il motore c'è e il file è uno di quelli verificati in MODELS_DIR."""
+        name = self.settings.get("whisper_model") or ""
+        path = MODELS_DIR / name
+        if name and WHISPER_EXE.exists() and path.is_file():
+            return path
+        return None
+
+    def _transcribe(self, job, src: Path, out_base: Path):
+        """Converte l'audio nel formato di Whisper (WAV 16 kHz mono), lo trascrive e salva .txt e .srt.
+        Restituisce (ok, errore)."""
+        model = self._whisper_model_path()
+        if not model:
+            return False, "Per la trascrizione scegli prima un modello: Impostazioni → Trascrizione."
+        if not src.is_file():
+            return False, "Non trovo l'audio da trascrivere."
+        wav = CACHE_DIR / f"tr-{job['id']}.wav"
+        n = 2
+        while out_base.with_suffix(".txt").exists() or out_base.with_suffix(".srt").exists():
+            out_base = out_base.with_name(f"{out_base.name.rsplit(' (', 1)[0]} ({n})")   # non sovrascrive
+            n += 1
+        try:
+            job.update(status="processing", percent=0, speed=None, eta=None)
+            self._emit("job", self._public(job))
+            conv = subprocess.run([self._exe("ffmpeg"), "-nostdin", "-y", "-v", "error", "-i", str(src),
+                                   "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav)],
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                  creationflags=NO_WINDOW, timeout=1800)
+            if conv.returncode != 0 or not wav.is_file():
+                log.warning("conversione per la trascrizione non riuscita: %s", conv.stderr[-200:])
+                return False, "Non riesco a leggere l'audio di questo file."
+            seconds = max(1.0, (wav.stat().st_size - 44) / 32000)
+            # scheda NVIDIA se attivata e scaricata; se non parte o sbaglia, si rifà sul processore
+            engines = ([("gpu", WHISPER_GPU_EXE)] if self._gpu_ready() else []) + [("cpu", WHISPER_EXE)]
+            # whisper-cli non sa scrivere file con emoji o caratteri non latini nel nome (es. molti
+            # titoli YouTube): scrive in una cartella temporanea con un nome semplice, poi i file
+            # vengono spostati con il titolo vero
+            work = CACHE_DIR / f"tr-{job['id']}-testo"
+            txt = out_base.with_suffix(".txt")
+            for i, (kind, exe) in enumerate(engines):
+                for f in (work.with_suffix(".txt"), work.with_suffix(".srt")):
+                    f.unlink(missing_ok=True)
+                ok, used_gpu, tail, secs = self._run_whisper(job, exe, model, wav, work, kind == "gpu")
+                if job["cancel"]:
+                    for f in (work.with_suffix(".txt"), work.with_suffix(".srt")):
+                        f.unlink(missing_ok=True)
+                    return False, "Annullato"
+                if ok:
+                    for ext in (".txt", ".srt"):
+                        if work.with_suffix(ext).is_file():
+                            shutil.move(str(work.with_suffix(ext)), str(out_base.with_suffix(ext)))
+                    if kind == "gpu" and not used_gpu:
+                        # testo pronto, ma la scheda non è stata usata (es. driver vecchio): niente da rifare
+                        job["warning"] = ("La scheda NVIDIA non è stata usata: la trascrizione è andata sul "
+                                          "processore. Aggiornare il driver NVIDIA di solito risolve.")
+                    log.info("trascrizione: %.0fs di audio in %.1fs (%.3fx), modello %s, lingua %s, %s",
+                             seconds, secs, secs / seconds, model.name, self.settings.get("whisper_lang"),
+                             "GPU" if used_gpu else "processore")
+                    job["file"] = str(txt)
+                    return True, ""
+                log.warning("trascrizione %s non riuscita (codice %s, testo scritto: %s): %s", kind,
+                            self._last_code, work.with_suffix(".txt").is_file(), " | ".join(tail)[-300:])
+                if kind == "gpu" and i + 1 < len(engines):
+                    job["warning"] = ("La scheda NVIDIA non ha funzionato per questa trascrizione: "
+                                      "la faccio con il processore.")
+            return False, "La trascrizione non è riuscita. Riprova, o prova un modello diverso."
+        finally:
+            wav.unlink(missing_ok=True)
+            for f in (CACHE_DIR / f"tr-{job['id']}-testo.txt", CACHE_DIR / f"tr-{job['id']}-testo.srt"):
+                f.unlink(missing_ok=True)
+
+    def _run_whisper(self, job, exe, model, wav, out_base, gpu):
+        """Una esecuzione di whisper-cli. Restituisce (ok, GPU usata davvero, ultime righe, secondi)."""
+        threads = max(1, min((os.cpu_count() or 4) - 2, 12))
+        # percorsi "corti" di Windows: senza caratteri speciali anche se il nome utente ne ha
+        out_dir = short_path(out_base.parent)
+        args = [str(exe), "-m", short_path(model), "-f", short_path(wav),
+                "-l", self.settings.get("whisper_lang") or "auto", "-t", str(threads), "-otxt", "-osrt",
+                "-of", os.path.join(out_dir, out_base.name), "-pp"]
+        if not gpu:
+            args.append("-ng")                      # niente GPU: solo processore
+        job.update(status="transcribing", percent=0, eta=None)
+        self._emit("job", self._public(job))
+        t0, last, tail, used_gpu = time.time(), 0, [], False
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+        job["proc"] = proc
+        for line in proc.stdout:
+            m = trascrizione.PROGRESS_RE.search(line)
+            if m:
+                job["percent"] = min(99.0, float(m.group(1)))
+                if job["percent"] > 2:
+                    job["eta"] = (time.time() - t0) * (100 - job["percent"]) / job["percent"]
+                if time.time() - last > 0.5:
+                    last = time.time()
+                    self._emit("job", self._public(job))
+            else:
+                used_gpu = used_gpu or bool(trascrizione.GPU_OK_RE.search(line))
+                tail = (tail + [line.strip()])[-5:]
+        proc.wait()
+        self._last_code = proc.returncode
+        ok = proc.returncode == 0 and out_base.with_suffix(".txt").is_file()
+        return ok, used_gpu, tail, time.time() - t0
+
+    def _gpu_ready(self):
+        return bool(self.settings.get("whisper_gpu")) and WHISPER_GPU_EXE.exists() and self._system()["nvidia"]
+
+    def transcribe_file(self):
+        """Trascrive un file audio o video già presente sul PC, scelto con la finestra di Windows."""
+        if not self._whisper_model_path():
+            return {"ok": False, "error": "Per la trascrizione scegli prima un modello: Impostazioni → Trascrizione."}
+        res = self._window.create_file_dialog(webview.OPEN_DIALOG, file_types=(
+            "Audio e video (*.mp3;*.m4a;*.wav;*.mp4;*.mkv;*.webm;*.mov;*.ogg;*.opus;*.flac;*.aac)",))
+        if not res:
+            return {"ok": False}
+        src = Path(res[0] if isinstance(res, (list, tuple)) else res)
+        job_id = uuid.uuid4().hex[:10]
+        job = {"id": job_id, "url": "", "status": "queued", "percent": 0, "title": src.name[:300],
+               "thumbnail": None, "site": "File", "mode": "text", "quality": "Testo",
+               "folder": str(src.parent), "file": None, "proc": None, "cancel": False,
+               "item": "", "speed": None, "eta": None}
+        with self._lock:
+            self._jobs[job_id] = job
+        self._emit("job", self._public(job))
+
+        def work():
+            with self._slots:
+                try:
+                    ok, err = self._transcribe(job, src, src.with_suffix(""))
+                    if job["cancel"]:
+                        job["status"] = "cancelled"
+                    elif ok:
+                        job["status"], job["percent"] = "done", 100
+                        self._add_history(job)
+                    else:
+                        job.update(status="error", error=err)
+                except Exception as e:
+                    job.update(status="error", error=str(e))
+                job["proc"] = None
+                self._emit("job", self._public(job))
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
+
+    def _system(self):
+        if getattr(self, "_sysinfo", None) is None:
+            self._sysinfo = self._read_system()
+        return self._sysinfo
+
+    @staticmethod
+    def _read_system():
+        class MEM(ctypes.Structure):
+            _fields_ = [("dwLength", wt.DWORD), ("dwMemoryLoad", wt.DWORD), ("ullTotalPhys", ctypes.c_ulonglong),
+                        ("ullAvailPhys", ctypes.c_ulonglong), ("ullTotalPageFile", ctypes.c_ulonglong),
+                        ("ullAvailPageFile", ctypes.c_ulonglong), ("ullTotalVirtual", ctypes.c_ulonglong),
+                        ("ullAvailVirtual", ctypes.c_ulonglong), ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        m = MEM()
+        m.dwLength = ctypes.sizeof(MEM)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+        smi = os.path.join(_WINDIR, "System32", "nvidia-smi.exe")      # c'è solo con il driver NVIDIA
+        nvidia, gpu_name = os.path.exists(smi), ""
+        if nvidia:
+            try:
+                gpu_name = subprocess.run([smi, "--query-gpu=name", "--format=csv,noheader"], capture_output=True,
+                                          text=True, creationflags=NO_WINDOW, timeout=8).stdout.strip().splitlines()[0][:60]
+            except Exception:
+                gpu_name = "scheda NVIDIA"
+        return {"ram": round(m.ullTotalPhys / 2**30, 1), "cores": os.cpu_count() or 4, "nvidia": nvidia,
+                "gpu_name": gpu_name}
+
+    def whisper_info(self):
+        """Tutto quello che serve alla pagina Trascrizione: catalogo, cosa è scaricato, consigli."""
+        sysinfo = self._system()
+        have = {p.name for p in MODELS_DIR.glob("ggml-*.bin")} if MODELS_DIR.is_dir() else set()
+        models = []
+        gpu_on = self._gpu_ready()
+        for m in trascrizione.CATALOG:
+            rtf = (trascrizione.estimate_rtf_gpu(m["id"]) if gpu_on
+                   else trascrizione.estimate_rtf(m["id"], sysinfo["cores"]))
+            models.append({k: m.get(k) for k in ("id", "name", "file", "size", "file_en", "size_en", "it", "en",
+                                                  "speed", "ram", "note")}
+                          | {"have": m["file"] in have, "have_en": bool(m.get("file_en")) and m["file_en"] in have,
+                             "ten_min": round(600 * rtf)})
+        used = sum((MODELS_DIR / f).stat().st_size for f in have) if have else 0
+        return {"engine": WHISPER_EXE.exists(), "models": models, "current": self.settings.get("whisper_model"),
+                "lang": self.settings.get("whisper_lang"), "system": sysinfo, "disk": used,
+                "gpu_installed": WHISPER_GPU_EXE.exists(), "gpu_on": gpu_on,
+                "gpu_disk": dir_size(WHISPER_GPU_DIR) if WHISPER_GPU_DIR.is_dir() else 0,
+                "recommended": trascrizione.recommend(sysinfo["ram"], sysinfo["cores"], sysinfo["nvidia"])}
+
+    def _install_whisper(self, gpu=False):
+        """Motore whisper.cpp: la release più recente che contiene lo zip per Windows (per processore,
+        o CUDA per le schede NVIDIA), verificato con l'impronta che GitHub pubblica per quel file."""
+        asset_name = trascrizione.ENGINE_GPU_ASSET if gpu else trascrizione.ENGINE_ASSET
+        req = urllib.request.Request(f"https://api.github.com/repos/{trascrizione.ENGINE_REPO}/releases?per_page=10",
+                                     headers={"User-Agent": f"{APP_NAME}/{APP_VERSION}"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            releases = json.loads(r.read().decode("utf-8"))
+        asset = next((a for rel in releases if isinstance(rel, dict) for a in rel.get("assets") or []
+                      if a.get("name") == asset_name), None)
+        if not asset or not str(asset.get("digest") or "").startswith("sha256:"):
+            raise ValueError("non trovo il motore di trascrizione verificabile su GitHub")
+        url = asset["browser_download_url"]
+        if not url.startswith(f"https://github.com/{trascrizione.ENGINE_REPO}/releases/download/"):
+            raise ValueError("indirizzo del motore inatteso")
+
+        def keep(name):
+            base = name.replace("\\", "/").split("/")[-1]
+            # whisper-cli e le sue librerie: ggml, ggml-base, le varianti ggml-cpu-* per ogni processore
+            # e, per la GPU, ggml-cuda con le librerie NVIDIA che servono
+            if base in ("whisper-cli.exe", "whisper.dll") or re.fullmatch(r"ggml(-[\w-]+)?\.dll", base):
+                return base
+            return base if gpu and base in trascrizione.GPU_DLLS else None
+        self._install_zip(url, "accelerazione NVIDIA" if gpu else "motore di trascrizione",
+                          WHISPER_GPU_DIR if gpu else WHISPER_DIR, keep, expected_sha=asset["digest"][7:],
+                          event="model" if gpu else "setup")
+
+    def whisper_gpu(self, enable):
+        """Attiva o disattiva la scheda NVIDIA; la prima volta scarica il motore CUDA (653 MB)."""
+        if not enable:
+            self.save_settings({"whisper_gpu": False})
+            return {"ok": True, **self.whisper_info()}
+        if not self._system()["nvidia"]:
+            return {"ok": False, "error": "Su questo PC non c'è una scheda NVIDIA."}
+        try:
+            if not WHISPER_GPU_EXE.exists():
+                self._install_whisper(gpu=True)
+            self.save_settings({"whisper_gpu": True})
+            log.info("accelerazione NVIDIA attivata")
+            return {"ok": True, **self.whisper_info()}
+        except Exception as e:
+            log.exception("motore CUDA non installato")
+            return {"ok": False, "error": str(e)}
+
+    def whisper_gpu_delete(self):
+        """Toglie il motore CUDA (circa 1,1 GB su disco): si torna al processore."""
+        self.save_settings({"whisper_gpu": False})
+        shutil.rmtree(WHISPER_GPU_DIR, ignore_errors=True)
+        return {"ok": True, **self.whisper_info()}
+
+    def whisper_download(self, model_id, english=False):
+        """Scarica (se manca) il motore e il modello scelto, ne verifica l'impronta e lo imposta."""
+        m = next((x for x in trascrizione.CATALOG if x["id"] == model_id), None)
+        if not m or (english and not m.get("file_en")):
+            return {"ok": False, "error": "Modello sconosciuto"}
+        file, size, sha = (m["file_en"], m["size_en"], m["sha_en"]) if english else (m["file"], m["size"], m["sha"])
+        try:
+            if not WHISPER_EXE.exists():
+                self._install_whisper()
+            MODELS_DIR.mkdir(parents=True, exist_ok=True)
+            dest = MODELS_DIR / file
+            if not dest.is_file():
+                tmp = MODELS_DIR / (file + ".download")
+                self._download_file(trascrizione.MODEL_URL.format(file=file), tmp, m["name"], event="model")
+                if tmp.stat().st_size != size or trascrizione.sha256_file(tmp) != sha:
+                    tmp.unlink(missing_ok=True)
+                    raise ValueError("il modello scaricato non è integro. Riprova.")
+                os.replace(tmp, dest)
+            self.save_settings({"whisper_model": file})
+            log.info("modello di trascrizione pronto: %s", file)
+            return {"ok": True, **self.whisper_info()}
+        except Exception as e:
+            log.exception("download del modello non riuscito")
+            return {"ok": False, "error": str(e)}
+
+    def whisper_use(self, file):
+        if isinstance(file, str) and file in trascrizione.model_files() and (MODELS_DIR / file).is_file():
+            self.save_settings({"whisper_model": file})
+            return True
+        return False
+
+    def whisper_delete(self, file):
+        if not (isinstance(file, str) and file in trascrizione.model_files()):
+            return False
+        (MODELS_DIR / file).unlink(missing_ok=True)
+        if self.settings.get("whisper_model") == file:
+            self.save_settings({"whisper_model": ""})
+        return True
+
+    def whisper_scan(self):
+        """Cerca modelli già scaricati da altre app e li riconosce dall'impronta."""
+        roots = [os.environ.get("APPDATA", ""), os.environ.get("LOCALAPPDATA", ""),
+                 str(Path.home() / ".cache"), str(Path.home() / "Documents"), str(Path.home() / "Downloads")]
+        found = trascrizione.discover([r for r in roots if r], DATA_DIR)
+        self._scan = [trascrizione.identify(p) for p in found]
+        log.info("ricerca modelli: %d trovati", len(self._scan))
+        return self._scan
+
+    def whisper_import(self, path):
+        """Usa un modello trovato sul PC: solo se la ricerca l'ha riconosciuto come ufficiale e integro.
+        Se possibile è un collegamento al file (nessuno spazio in più), altrimenti una copia."""
+        item = next((s for s in getattr(self, "_scan", []) if s["path"] == path and s["status"] == "ok"), None)
+        if not item:
+            return {"ok": False, "error": "Questo file non è utilizzabile."}
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+        dest = MODELS_DIR / item["official"]
+        try:
+            if not dest.exists():
+                try:
+                    os.link(path, dest)
+                except OSError:
+                    shutil.copyfile(path, dest)
+            if trascrizione.sha256_file(dest) != item["sha"]:
+                dest.unlink(missing_ok=True)
+                return {"ok": False, "error": "Il file è cambiato nel frattempo: rifai la ricerca."}
+            self.save_settings({"whisper_model": item["official"]})
+            return {"ok": True, **self.whisper_info()}
+        except OSError as e:
+            return {"ok": False, "error": str(e)}
 
     def _take_cache(self, url):
         """Analisi salvata dall'anteprima, se recente (i link dei formati scadono)."""

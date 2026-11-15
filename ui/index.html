@@ -27,6 +27,7 @@
   --mono:"Cascadia Mono","Cascadia Code",Consolas,monospace;
 }
 *{box-sizing:border-box;margin:0;padding:0}
+[hidden]{display:none!important}
 /* fondo con un bagliore fisso del brand */
 html,body{height:100%;background-color:var(--bg);
   background-image:
@@ -162,6 +163,32 @@ select:disabled{opacity:.4;cursor:default}
   background:rgba(0,0,0,.14);border-radius:0 0 var(--r) var(--r)}
 .opts .grow{flex:1}
 .thumb-note{font-size:12.5px;color:var(--muted)}
+.thumb-note a{color:#c9a7ff;cursor:pointer;text-decoration:none;border-bottom:1px solid rgba(201,167,255,.35)}
+.thumb-note select{height:26px;margin-left:6px;font-size:12px}
+/* trascrizione */
+.w-status{color:var(--dim)!important;margin-top:8px!important}
+.models{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px;margin-top:12px}
+.model{padding:14px 16px;display:flex;flex-direction:column;gap:9px}
+.model.current{border-color:rgba(139,106,230,.6);box-shadow:0 0 0 1px rgba(139,106,230,.35) inset, 0 18px 40px -24px rgba(0,0,0,.6)}
+.model-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.model-head b{font-size:14px;font-weight:600}
+.model-head .size{color:var(--dim);font-size:12px}
+.badge{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:10px;background:var(--btn-grad);color:#fff}
+.badge.soft{background:var(--glass-2);color:var(--muted);border:1px solid var(--glass-line)}
+.meters{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;font-size:12px;color:var(--muted);align-items:center}
+.dots{display:flex;gap:3px}
+.dots i{width:14px;height:5px;border-radius:3px;background:rgba(255,255,255,.1)}
+.dots i.on{background:var(--brand-grad);background-size:80px 100%}
+.model .note{font-size:12px;color:var(--muted);line-height:1.45}
+.model .eta{font-size:11.5px;color:var(--dim)}
+.model .acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto}
+.model .bar{margin-top:2px}
+.scan-item{display:flex;align-items:center;gap:12px;padding:10px 16px;border-top:1px solid var(--glass-line);font-size:12.5px}
+.scan-item .lbl{flex:1;min-width:0}
+.scan-item .lbl b{display:block;font-weight:500}
+.scan-item .lbl span{display:block;color:var(--muted);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip{font-size:11px;font-weight:600;padding:1px 8px;border-radius:10px;white-space:nowrap}
+.chip.ok{background:rgba(63,185,127,.15);color:var(--ok)} .chip.bad{background:rgba(229,72,77,.15);color:#ff8d8f} .chip.mid{background:rgba(226,163,54,.15);color:var(--warn)}
 .seg[hidden],.thumb-note[hidden]{display:none}
 
 /* ---------- coda ---------- */
@@ -302,9 +329,11 @@ select:disabled{opacity:.4;cursor:default}
             <button data-v="video"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="13" height="12" rx="2"/><path d="m16 10.5 5-3v9l-5-3"/></svg>Video</button>
             <button data-v="audio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/></svg>Audio</button>
             <button data-v="thumb"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="1.6"/><path d="m21 16-5-5-9 8"/></svg>Miniatura</button>
+            <button data-v="text" title="Trascrive l'audio in testo (.txt) e sottotitoli (.srt)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 11h16M4 16h10"/></svg>Testo</button>
           </div>
           <div class="seg" id="qualitySeg"></div>
           <span class="thumb-note" id="thumbNote" hidden>JPG · massima risoluzione</span>
+          <span class="thumb-note" id="textNote" hidden></span>
           <div class="grow"></div>
           <button class="btn primary" id="dlBtn">Scarica</button>
         </div>
@@ -313,6 +342,7 @@ select:disabled{opacity:.4;cursor:default}
       <div class="sec">
         <h2>Coda <span id="queueInfo"></span></h2>
         <div class="acts">
+          <button class="btn sm" id="transcribeFileBtn" title="Trascrive un audio o un video che hai già sul PC">Trascrivi un file…</button>
           <button class="btn sm" id="openFolderBtn">Apri cartella</button>
           <button class="btn sm" id="clearBtn">Rimuovi completati</button>
         </div>
@@ -370,6 +400,29 @@ select:disabled{opacity:.4;cursor:default}
           <div class="lbl"><b>Quando usare i cookie</b><span>Leggere i cookie rallenta l'analisi di qualche secondo. "Solo quando servono" li usa subito su Instagram e Facebook, e altrove solo se il sito chiede il login.</span></div>
           <select id="setCookieWhen"><option value="auto">Solo quando servono</option><option value="always">Sempre</option></select>
         </div>
+      </div>
+
+      <div class="group-label" id="trascrizione">Trascrizione (Whisper)</div>
+      <div class="panel">
+        <div class="row">
+          <div class="lbl"><b>Audio in testo, direttamente sul tuo PC</b><span>Con la modalità <b style="display:inline;font-weight:600">Testo</b> o con "Trascrivi un file…" AxGrab scrive tutto quello che si dice in un .txt e in sottotitoli .srt. Niente viene inviato online. Serve un modello, che si scarica una volta sola: scegli quello giusto qui sotto. Chi non usa la trascrizione non scarica nulla.</span><span id="whisperStatus" class="w-status"></span></div>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>Lingua dell'audio</b><span>"Automatica" la riconosce da sola; sceglierla rende la trascrizione un po' più affidabile.</span></div>
+          <select id="setWhisperLang" data-anchor="lang"><option value="auto">Automatica</option><option value="it">Italiano</option><option value="en">Inglese</option><option value="es">Spagnolo</option><option value="fr">Francese</option><option value="de">Tedesco</option><option value="pt">Portoghese</option></select>
+        </div>
+        <div class="row" id="gpuRow" hidden>
+          <div class="lbl"><b>Usa la scheda NVIDIA</b><span id="gpuText"></span><div id="gpuProgress"></div></div>
+          <div style="display:flex;gap:6px;align-items:center"><button class="btn sm danger" id="gpuDeleteBtn" hidden>Elimina</button><div class="toggle" id="setGpu"></div></div>
+        </div>
+      </div>
+      <div class="models" id="models"></div>
+      <div class="panel" style="margin-top:12px">
+        <div class="row">
+          <div class="lbl"><b>Modelli già sul PC</b><span>Se un'altra app (es. Easy Whisper) ha già scaricato un modello, AxGrab lo riconosce dall'impronta e lo usa senza riscaricarlo. I file incompleti o modificati vengono segnalati e mai usati.</span></div>
+          <button class="btn sm" id="scanModelsBtn">Cerca</button>
+        </div>
+        <div id="scanResults"></div>
       </div>
 
       <div class="group-label">Aggiornamenti</div>
@@ -499,9 +552,16 @@ const QUALS = [["best","Max"],["2160","4K"],["1440","1440p"],["1080","1080p"],["
 function renderOpts(){
   document.querySelectorAll("#modeSeg button").forEach(b=>b.classList.toggle("on", b.dataset.v===settings.mode));
   const qs = $("#qualitySeg");
-  qs.hidden = settings.mode === "thumb";
+  qs.hidden = settings.mode === "thumb" || settings.mode === "text";
   $("#thumbNote").hidden = settings.mode !== "thumb";
-  if(settings.mode==="thumb"){
+  $("#textNote").hidden = settings.mode !== "text";
+  if(settings.mode==="text"){
+    qs.innerHTML = "";
+    const m = currentModel();
+    $("#textNote").innerHTML = m
+      ? `Trascrizione con <b style="color:var(--text);font-weight:600">${esc(m.name)}</b> · <a data-go="models">cambia</a>`
+      : `Serve un modello per trascrivere · <a data-go="models">scegli il modello</a>`;
+  } else if(settings.mode==="thumb"){
     qs.innerHTML = "";
   } else if(settings.mode==="audio"){
     const tip = {m4a:"Nessuna conversione: il più veloce", mp3:"Convertito in MP3: qualche secondo in più"};
@@ -512,7 +572,23 @@ function renderOpts(){
       .map(([v,l])=>`<button data-q="${v}" class="${settings.quality===v?"on":""}">${l}</button>`).join("");
   }
 }
-$("#modeSeg").onclick = e => { const b=e.target.closest("button"); if(b) save({mode:b.dataset.v}); };
+$("#modeSeg").onclick = async e => {
+  const b=e.target.closest("button"); if(!b) return;
+  if(b.dataset.v === "text" && !currentModel()){
+    // prima volta: spiega la funzione invece di lasciare un pulsante che non funziona
+    if(await ask("Trascrivere l'audio in testo",
+      "AxGrab può scrivere tutto quello che si dice in un video, in un .txt e in sottotitoli .srt, direttamente sul tuo PC. "
+      + "Per farlo serve un modello di Whisper, che si scarica una volta sola (da 31 MB a 1 GB, lo scegli tu). Vuoi sceglierlo ora?",
+      "Scegli il modello", false)) goModels();
+    return;
+  }
+  save({mode:b.dataset.v});
+};
+$("#textNote").onclick = e => { if(e.target.dataset.go) goModels(); };
+function goModels(){
+  document.querySelector('.nav[data-view="settings"]').click();
+  setTimeout(() => $("#trascrizione").scrollIntoView({behavior:"smooth", block:"start"}), 50);
+}
 $("#qualitySeg").onclick = e => { const b=e.target.closest("button"); if(!b) return; b.dataset.q ? save({quality:b.dataset.q}) : save({audio_format:b.dataset.a}); };
 async function save(patch){ Object.assign(settings, patch); renderOpts(); renderSettings(); settings = await api.save_settings(patch); }
 
@@ -562,8 +638,8 @@ $("#dlBtn").onclick = async () => {
 };
 
 /* ---------- coda ---------- */
-const STATUS = {queued:"In attesa", downloading:"Download", processing:"Elaborazione", done:"Completato", error:"Errore", cancelled:"Annullato"};
-const busy = j => ["queued","downloading","processing"].includes(j.status);
+const STATUS = {queued:"In attesa", downloading:"Download", processing:"Elaborazione", transcribing:"Trascrizione", done:"Completato", error:"Errore", cancelled:"Annullato"};
+const busy = j => ["queued","downloading","processing","transcribing"].includes(j.status);
 function renderQueue(){
   const list = Object.values(jobs).reverse();
   const active = list.filter(busy).length;
@@ -571,7 +647,9 @@ function renderQueue(){
   $("#queueInfo").textContent = list.length ? `${active} in corso · ${list.length} totali` : "";
   if(!list.length){ $("#queue").innerHTML = `<div class="empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></svg>Nessun download in corso</div>`; return; }
   $("#queue").innerHTML = list.map(j=>{
-    const meta = [`<span class="status">${STATUS[j.status]}${j.status==="downloading"?` ${j.percent.toFixed(0)}%`:""}</span>`];
+    const live = j.status==="downloading" || j.status==="transcribing";
+    const meta = [`<span class="status">${STATUS[j.status]}${live?` ${j.percent.toFixed(0)}%`:""}</span>`];
+    if(j.status==="transcribing" && j.eta!=null) meta.push(`<span>${fmtDur(j.eta)} rimanenti</span>`);
     if(j.item) meta.push(`<span>${esc(j.item)}</span>`);
     if(j.status==="downloading" && j.speed) meta.push(`<span>${fmtBytes(j.speed)}/s</span>`);
     if(j.status==="downloading" && j.eta!=null) meta.push(`<span>${fmtDur(j.eta)} rimanenti</span>`);
@@ -638,10 +716,11 @@ $("#hist").addEventListener("click", e => {
 function redl(url){ document.querySelector('.nav[data-view="download"]').click(); $("#url").value=url; syncInput(); analyze(); }
 $("#histSearch").oninput = renderHistory;
 /* conferma nello stile dell'app, al posto del confirm() del browser (che mostra "127.0.0.1 says") */
-function ask(title, text, yesLabel = "Conferma"){
+function ask(title, text, yesLabel = "Conferma", danger = true){
   return new Promise(resolve => {
     const box = $("#askBox"), yes = $("#askYes"), no = $("#askNo");
     $("#askTitle").textContent = title; $("#askText").textContent = text; yes.textContent = yesLabel;
+    yes.className = "btn sm " + (danger ? "danger solid" : "primary");   // rosso solo per azioni che cancellano
     const done = v => { box.classList.remove("show"); document.removeEventListener("keydown", onKey); box.onclick = yes.onclick = no.onclick = null; resolve(v); };
     const onKey = e => { if(e.key === "Escape") done(false); else if(e.key === "Enter"){ e.preventDefault(); done(true); } };
     yes.onclick = () => done(true); no.onclick = () => done(false);
@@ -698,8 +777,106 @@ $("#unConfirm").onclick = async () => {
   if(!ok){ $("#unConfirm").disabled = false; $("#unConfirm").textContent = "Disinstalla"; $("#uninstall").classList.remove("show"); }
 };
 
+/* ---------- trascrizione (Whisper) ---------- */
+let winfo = null, downloading = null;
+const currentModel = () => winfo?.models.find(m => [m.file, m.file_en].includes(winfo.current))
+  ? {...winfo.models.find(m => [m.file, m.file_en].includes(winfo.current)), en: winfo.current.includes(".en")} : null;
+const dots = n => `<span class="dots">${[1,2,3,4,5].map(i => `<i class="${i<=n?"on":""}"></i>`).join("")}</span>`;
+const fmtTime = s => s < 60 ? `${Math.max(1, Math.round(s))} s` : `${Math.round(s/60)} min`;
+async function loadWhisper(){ winfo = await api.whisper_info(); renderWhisper(); renderOpts(); }
+function renderWhisper(){
+  if(!winfo) return;
+  const sys = winfo.system, cur = winfo.current;
+  $("#setWhisperLang").value = winfo.lang || "auto";
+  // scheda NVIDIA: solo se c'è; il motore CUDA si scarica solo attivando l'interruttore
+  $("#gpuRow").hidden = !sys.nvidia;
+  $("#setGpu").classList.toggle("on", !!winfo.gpu_on);
+  $("#gpuDeleteBtn").hidden = !winfo.gpu_installed || (downloading && downloading.id === "gpu");
+  $("#gpuText").textContent = winfo.gpu_installed
+    ? `Trascrive con la ${sys.gpu_name || "scheda NVIDIA"}: circa 7 volte più veloce del processore. Occupa ${fmtBytes(winfo.gpu_disk)}: "Elimina" lo toglie e si torna al processore.`
+    : `Trascrive con la ${sys.gpu_name || "scheda NVIDIA"}: circa 7 volte più veloce del processore. Attivandola si scarica una volta sola il motore NVIDIA (653 MB, 1,1 GB su disco). La prima trascrizione richiede circa mezzo minuto in più: la scheda si prepara una volta sola.`;
+  const g = downloading && downloading.id === "gpu" ? downloading : null;
+  $("#gpuProgress").innerHTML = g ? `<div class="bar" style="margin-top:8px"><i style="width:${g.total ? g.done/g.total*100 : 0}%"></i></div>
+    <span>${esc(g.label)} · ${fmtBytes(g.done)}${g.total ? " di " + fmtBytes(g.total) : ""}</span>` : "";
+  $("#whisperStatus").textContent = (winfo.engine ? "Motore installato" : "Motore non ancora installato (9 MB, si scarica con il primo modello)")
+    + ` · modelli scaricati: ${winfo.disk ? fmtBytes(winfo.disk) : "nessuno"} · questo PC: ${sys.cores} core, ${sys.ram} GB di RAM${sys.nvidia ? ", scheda NVIDIA" : ""}`;
+  $("#models").innerHTML = winfo.models.map(m => {
+    const isCur = cur === m.file || cur === m.file_en, rec = m.id === winfo.recommended;
+    const busy = downloading && downloading.id === m.id;
+    const pct = busy && downloading.total ? downloading.done / downloading.total * 100 : 0;
+    const btn = (file, en, have, label) => have
+      ? (cur === file ? `<button class="btn sm" disabled>In uso</button>` : `<button class="btn sm" data-use="${file}">Usa${label}</button>`)
+        + `<button class="btn sm danger" data-del="${file}" title="Elimina il file del modello">Elimina${label}</button>`
+      : `<button class="btn sm ${en?"":"primary"}" data-dl="${m.id}" data-en="${en?1:""}" ${downloading?"disabled":""}>Scarica${label} · ${fmtBytes(en?m.size_en:m.size)}</button>`;
+    return `<div class="panel model ${isCur?"current":""}">
+      <div class="model-head"><b>${esc(m.name)}</b><span class="size">${fmtBytes(m.size)}</span>
+        ${rec?'<span class="badge">Consigliato per questo PC</span>':""}${isCur?'<span class="badge soft">In uso</span>':""}</div>
+      <div class="meters"><span>Italiano</span>${dots(m.it)}<span>Inglese</span>${dots(m.en)}<span>Velocità</span>${dots(m.speed)}</div>
+      <div class="note">${esc(m.note)}</div>
+      <div class="eta">10 minuti di audio ≈ ${fmtTime(m.ten_min)} su questo PC${winfo.gpu_on ? " con la GPU" : ""} · RAM consigliata ${m.ram} GB</div>
+      ${busy ? `<div class="bar"><i style="width:${pct}%"></i></div><div class="eta">${esc(downloading.label)} · ${fmtBytes(downloading.done)}${downloading.total?" di "+fmtBytes(downloading.total):""}</div>` : ""}
+      <div class="acts">${btn(m.file, false, m.have, "")}${m.file_en ? btn(m.file_en, true, m.have_en, " solo inglese") : ""}</div>
+    </div>`;
+  }).join("");
+}
+$("#models").addEventListener("click", async e => {
+  const b = e.target.closest("button"); if(!b || b.disabled) return;
+  if(b.dataset.dl){
+    downloading = {id: b.dataset.dl, done: 0, total: 0, label: "Avvio"}; renderWhisper();
+    const r = await api.whisper_download(b.dataset.dl, !!b.dataset.en);
+    downloading = null;
+    if(r.ok){ winfo = r; renderWhisper(); renderOpts(); toast("Modello pronto: ora puoi usare la modalità Testo", "var(--ok)"); }
+    else { renderWhisper(); toast("Download non riuscito: " + r.error, "var(--err)"); }
+  } else if(b.dataset.use){ await api.whisper_use(b.dataset.use); await loadWhisper(); }
+  else if(b.dataset.del){
+    if(!await ask("Eliminare il modello?", "Il file del modello viene cancellato da questo PC. Potrai riscaricarlo quando vuoi.", "Elimina")) return;
+    await api.whisper_delete(b.dataset.del); await loadWhisper();
+  }
+});
+$("#setGpu").onclick = async () => {
+  if(downloading) return;
+  const enable = !winfo.gpu_on;
+  if(enable && !winfo.gpu_installed){
+    if(!await ask("Usare la scheda NVIDIA?", "Si scarica una volta sola il motore NVIDIA: 653 MB (1,1 GB su disco). "
+      + "Le trascrizioni diventano circa 7 volte più veloci. Puoi toglierlo quando vuoi con \"Elimina\".", "Scarica e attiva", false)) return;
+    downloading = {id: "gpu", done: 0, total: 0, label: "Accelerazione NVIDIA"}; renderWhisper();
+  }
+  const r = await api.whisper_gpu(enable);
+  downloading = null;
+  if(r.ok){ winfo = r; renderWhisper(); if(enable) toast("Scheda NVIDIA attiva per la trascrizione", "var(--ok)"); }
+  else { renderWhisper(); toast(r.error, "var(--err)"); }
+};
+$("#gpuDeleteBtn").onclick = async () => {
+  if(!await ask("Togliere il motore NVIDIA?", `Libera ${fmtBytes(winfo.gpu_disk)}; le trascrizioni torneranno sul processore. Potrai riscaricarlo quando vuoi.`, "Elimina")) return;
+  winfo = await api.whisper_gpu_delete(); renderWhisper();
+};
+$("#setWhisperLang").onchange = e => { save({whisper_lang: e.target.value}); if(winfo) winfo.lang = e.target.value; };
+$("#scanModelsBtn").onclick = async () => {
+  const b = $("#scanModelsBtn"); b.disabled = true; b.innerHTML = '<div class="spin"></div>Cerco';
+  const found = await api.whisper_scan();
+  b.disabled = false; b.textContent = "Cerca di nuovo";
+  const chip = {ok: ["ok", "Utilizzabile"], other: ["mid", "Non consigliato"], unknown: ["bad", "Non integro"], invalid: ["bad", "Non valido"]};
+  $("#scanResults").innerHTML = found.length ? found.map((f, i) => `<div class="scan-item">
+      <div class="lbl"><b>${esc(f.name)} · ${fmtBytes(f.size)} · ${esc(f.family)}</b><span title="${esc(f.path)}">${esc(f.why)} ${esc(f.path)}</span></div>
+      <span class="chip ${chip[f.status][0]}">${chip[f.status][1]}</span>
+      ${f.status === "ok" ? `<button class="btn sm" data-imp="${i}">Usa questo</button>` : ""}</div>`).join("")
+    : `<div class="scan-item"><div class="lbl"><span>Nessun modello trovato nelle cartelle delle app e in Documenti/Download.</span></div></div>`;
+  $("#scanResults").onclick = async e => {
+    const btn = e.target.closest("button[data-imp]"); if(!btn) return;
+    const r = await api.whisper_import(found[+btn.dataset.imp].path);
+    if(r.ok){ winfo = r; renderWhisper(); renderOpts(); toast("Modello importato senza riscaricarlo", "var(--ok)"); }
+    else toast(r.error, "var(--err)");
+  };
+};
+$("#transcribeFileBtn").onclick = async () => {
+  if(!currentModel()){ if(await ask("Serve un modello", "Per trascrivere un file scegli prima un modello di Whisper.", "Scegli il modello", false)) goModels(); return; }
+  const r = await api.transcribe_file();
+  if(r && r.error) toast(r.error, "var(--err)");
+};
+
 /* ---------- eventi dal backend ---------- */
 window.onBackend = (ev, data) => {
+  if(ev==="model"){ if(downloading){ Object.assign(downloading, data); renderWhisper(); } return; }
   if(ev==="job"){
     const prevJob = jobs[data.id], prev = prevJob?.status; jobs[data.id] = data; renderQueue();
     if(data.warning && !prevJob?.warning) toast(data.warning, "var(--warn)");
@@ -764,7 +941,7 @@ async function init(){
   appInfo = await api.app_info();
   $("#appVer").textContent = `Versione ${appInfo.version}`; $("#aboutVer").textContent = appInfo.version;
   renderSettings(); renderOpts(); renderQueue();
-  await ensureDeps(); loadVersion();
+  await ensureDeps(); loadVersion(); loadWhisper();
   setTimeout(() => checkAppUpdate(false), 2500);
 }
 
@@ -785,6 +962,15 @@ function makeDemoApi(){
     mk("a","Lezione completa di fotografia notturna","Youtube","downloading",64,"2160p","https://youtube.com/x");
   }, 300);
   let maxed=false;
+  const W = (id,name,size,it,en,speed,ram,note,ten,en_size) => ({id,name,file:`ggml-${id}.bin`,size,file_en:en_size?`ggml-${id}.en.bin`:null,size_en:en_size,it,en,speed,ram,note,have:false,have_en:false,ten_min:ten});
+  const demoW = {engine:false, current:"", lang:"auto", disk:0, recommended:"turbo", gpu_installed:false, gpu_on:false, gpu_disk:0,
+    system:{ram:31.4,cores:16,nvidia:true,gpu_name:"NVIDIA GeForce RTX 5080"}, models:[
+    W("tiny","Tiny",32152673,1,2,5,1,"Solo per provare o per PC molto vecchi: in italiano sbaglia spesso.",17,32166155),
+    W("base","Base",59707625,2,3,5,1,"Appunti veloci con audio pulito, una sola persona che parla.",30,59721011),
+    W("small","Small",190085487,3,4,4,2,"Il giusto mezzo per PC normali senza scheda video dedicata.",66,190098681),
+    W("medium","Medium",539212467,4,5,2,4,"Preciso ma lento: a parità di peso, Large-v3 Turbo è meglio e più veloce.",210,539225533),
+    W("turbo","Large-v3 Turbo",574041195,5,5,3,4,"Il miglior rapporto tra qualità, velocità e peso. Ottimo in italiano.",138,null),
+    W("large","Large-v3",1081140203,5,5,1,6,"La massima precisione, a costo di tempi lunghi senza scheda video.",360,null)]};
   return {
     get_settings: async()=>st, save_settings: async p=>Object.assign(st,p), get_history: async()=>hist,
     check_deps: async()=>({ytdlp:true, ffmpeg:true, deno:true}), version: async()=>"2026.10.26",
@@ -796,6 +982,14 @@ function makeDemoApi(){
     open_url: async()=>1,
     open_log: async()=>1, data_info: async()=>({path:"C:\\Users\\Tu\\AppData\\Local\\AxGrab", size:187e6, exe:"C:\\Users\\Tu\\Desktop\\AxGrab.exe"}), open_data_folder: async()=>1, uninstall: async()=>1,
     win_drag: async()=>0, win_resize: async()=>0, win_minimize: async()=>0, win_close: async()=>0, win_toggle_max: async()=>(maxed=!maxed),
+    whisper_info: async()=>demoW, whisper_use: async f=>{demoW.current=f; return true;}, whisper_delete: async()=>true,
+    whisper_download: async id=>{ for(let d=0; d<=10; d++){ await new Promise(r=>setTimeout(r,120)); window.onBackend("model",{label:"Large-v3 Turbo",done:d*57e6,total:574e6}); }
+      const m=demoW.models.find(x=>x.id===id); m.have=true; demoW.current=m.file; demoW.engine=true; return {ok:true,...demoW}; },
+    whisper_scan: async()=>{ await new Promise(r=>setTimeout(r,500)); return [{name:"ggml-large-v3.bin", size:552876044, family:"large-v3 (f16)", status:"unknown", path:"C:\\Users\\Tu\\AppData\\Roaming\\easy-whisper-electron\\whisper-workspace\\models\\ggml-large-v3.bin", why:"Non corrisponde a nessun modello ufficiale: probabilmente un download interrotto o un file modificato. Non viene usato."}]; },
+    whisper_import: async()=>({ok:false,error:"demo"}), transcribe_file: async()=>({ok:true}),
+    whisper_gpu: async on=>{ if(on && !demoW.gpu_installed){ for(let d=0; d<=10; d++){ await new Promise(r=>setTimeout(r,120)); window.onBackend("model",{label:"accelerazione NVIDIA",done:d*68e6,total:684e6}); } demoW.gpu_installed=true; demoW.gpu_disk=1155e6; }
+      demoW.gpu_on=on; return {ok:true,...demoW}; },
+    whisper_gpu_delete: async()=>{ demoW.gpu_installed=false; demoW.gpu_on=false; demoW.gpu_disk=0; return {ok:true,...demoW}; },
   };
 }
 </script>

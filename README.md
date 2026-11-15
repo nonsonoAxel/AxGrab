@@ -30,6 +30,14 @@ quello vecchio. Impostazioni e cronologia restano.
 ## Funzioni
 - Anteprima (miniatura, titolo, durata, risoluzione massima) prima di scaricare
 - Video MP4 (Max / 4K / 1440p / 1080p / 720p / 480p) oppure solo audio M4A (il più veloce) o MP3
+- Solo la miniatura, in JPG alla massima risoluzione
+- **Trascrizione** (Whisper, tutto sul tuo PC, niente inviato online): modalità **Testo** per i link e
+  **Trascrivi un file…** per audio e video già sul PC. Salva un `.txt` e i sottotitoli `.srt`.
+  Il motore (9 MB) e il modello (da 31 MB a 1 GB) si scaricano **solo se usi la trascrizione**, scegliendo
+  il modello in *Impostazioni → Trascrizione*, dove trovi per ognuno peso, qualità in italiano e in
+  inglese e una stima dei tempi sul tuo PC. AxGrab riconosce anche i modelli già scaricati da altre app
+  e li usa senza riscaricarli. Con una **scheda NVIDIA** puoi attivare l'accelerazione (si scarica una
+  volta, 653 MB): su una RTX 5080 la trascrizione è circa 7 volte più veloce che sul processore
 - Più link insieme, uno per riga: vanno tutti in coda, con download contemporanei configurabili
 - Avanzamento, velocità, tempo rimanente, annulla e riprova
 - Playlist intere (opzione nelle impostazioni)
@@ -42,7 +50,8 @@ quello vecchio. Impostazioni e cronologia restano.
 - Disinstallazione completa dall'app
 
 ## Dove finiscono i dati
-Componenti (yt-dlp, ffmpeg, Deno), impostazioni, cronologia, copia dei cookie e log stanno in
+Componenti (yt-dlp, ffmpeg, Deno e, se usi la trascrizione, Whisper e i suoi modelli), impostazioni,
+cronologia, copia dei cookie e log stanno in
 `%LOCALAPPDATA%\AxGrab` (di solito `C:\Users\<nome>\AppData\Local\AxGrab`). Il percorso esatto è indicato
 nell'app in *Impostazioni → Dati e disinstallazione*, da dove puoi anche **disinstallare tutto**: l'app
 elimina quella cartella, l'EXE e i suoi collegamenti. I video scaricati non vengono toccati.
@@ -62,6 +71,7 @@ elimina quella cartella, l'EXE e i suoi collegamenti. I video scaricati non veng
 | File | Cosa contiene |
 |---|---|
 | `app.py` | motore: yt-dlp, coda, cookie, finestra, aggiornamenti |
+| `trascrizione.py` | Whisper: catalogo dei modelli con le impronte ufficiali, riconoscimento dei modelli sul PC, consigli |
 | `ui/index.html` | interfaccia (aperta in un browser parte in modalità demo) |
 | `assets/logo.png` | logo originale su fondo nero |
 | `make_icon.py` | dal logo genera `ui/logo.png`, `axgrab.ico` e `assets/icona-1024.png` |
