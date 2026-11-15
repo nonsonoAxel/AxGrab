@@ -30,7 +30,7 @@ import webview
 import firma
 
 APP_NAME = "AxGrab"
-APP_VERSION = "1.0.6"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.0.7"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxGrab"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -110,7 +110,7 @@ log = logging.getLogger(APP_NAME)
 
 DEFAULT_SETTINGS = {
     "folder": str(Path.home() / "Downloads"),
-    "mode": "video",          # video | audio
+    "mode": "video",          # video | audio | thumb (solo la miniatura, in JPG)
     "quality": "1080",        # best | 2160 | 1440 | 1080 | 720 | 480
     "audio_format": "mp3",    # mp3 | m4a
     "cookies": "none",        # none | firefox | zen | helium | chrome | edge | brave
@@ -121,7 +121,7 @@ DEFAULT_SETTINGS = {
 }
 # valori ammessi: tutto il resto (da settings.json o dall'interfaccia) viene scartato
 ALLOWED_SETTINGS = {
-    "mode": ("video", "audio"),
+    "mode": ("video", "audio", "thumb"),
     "quality": ("best", "2160", "1440", "1080", "720", "480"),
     "audio_format": ("mp3", "m4a"),
     "cookies": ("none", "firefox", "zen", "helium", "chrome", "edge", "brave"),
@@ -131,7 +131,8 @@ ALLOWED_SETTINGS = {
 URL_RE = re.compile(r"https?://[^\s\"<>]+\Z", re.I)
 # "Apri" avvia solo file di questo tipo, mai programmi o script
 MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".ts", ".m4v", ".3gp", ".gif",
-             ".m4a", ".mp3", ".opus", ".ogg", ".oga", ".flac", ".wav", ".aac", ".weba", ".mka"}
+             ".m4a", ".mp3", ".opus", ".ogg", ".oga", ".flac", ".wav", ".aac", ".weba", ".mka",
+             ".jpg", ".jpeg", ".png", ".webp"}
 
 
 def valid_url(url) -> bool:
@@ -892,6 +893,9 @@ class Api:
 
     # ---------- download ----------
     def _format_args(self, opts):
+        if opts["mode"] == "thumb":
+            # solo la miniatura alla massima risoluzione, convertita in JPG: nessun video scaricato
+            return ["--skip-download", "--write-thumbnail", "--convert-thumbnails", "jpg"]
         if opts["mode"] == "audio":
             return ["-f", "ba/b", "-x", "--audio-format", opts["audio_format"], "--audio-quality", "0",
                     "--embed-thumbnail", "--embed-metadata"]
@@ -912,7 +916,8 @@ class Api:
             "thumbnail": thumb if valid_url(thumb) else None,
             "site": site[:40] if isinstance(site, str) else "",
             "mode": opts["mode"],
-            "quality": opts["audio_format"].upper() if opts["mode"] == "audio" else
+            "quality": "JPG" if opts["mode"] == "thumb" else
+                       opts["audio_format"].upper() if opts["mode"] == "audio" else
                        ("Max" if opts["quality"] == "best" else opts["quality"] + "p"),
             "folder": opts["folder"], "file": None, "proc": None, "cancel": False,
             "item": "", "speed": None, "eta": None,
@@ -956,6 +961,8 @@ class Api:
                     cached[0].unlink(missing_ok=True)
                 if job["cancel"]:
                     job["status"] = "cancelled"
+                elif ok and opts["mode"] == "thumb" and not (job.get("file") and os.path.isfile(job["file"])):
+                    job.update(status="error", error="Questo contenuto non ha una miniatura da scaricare.")
                 elif ok:
                     job["status"], job["percent"] = "done", 100
                     self._add_history(job)
@@ -999,6 +1006,8 @@ class Api:
                 # un titolo con un "a capo" non può fingere una riga di stato
                 "--print", "before_dl:@@T|%(playlist_index)s|%(n_entries)s|%(title)j",
                 "--print", "after_move:@@F|%(filepath)j",
+                # solo miniatura: non c'è un file "spostato", il percorso è quello della miniatura
+                *(["--print", "after_video:@@F|%(thumbnails.-1.filepath)j"] if opts["mode"] == "thumb" else []),
                 *source]
         job["status"] = "downloading"
         self._emit("job", self._public(job))
@@ -1032,7 +1041,7 @@ class Api:
                 self._emit("job", self._public(job))
             elif line.startswith("@@F|"):
                 job["file"] = unjson(line[4:])
-            elif "[Merger]" in line or "[ExtractAudio]" in line:
+            elif "[Merger]" in line or "[ExtractAudio]" in line or "[ThumbnailsConvertor]" in line:
                 job["status"] = "processing"
                 self._emit("job", self._public(job))
             elif line.startswith("ERROR"):
