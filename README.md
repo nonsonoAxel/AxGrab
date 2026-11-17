@@ -88,18 +88,6 @@ elimina quella cartella, l'EXE e i suoi collegamenti. I video scaricati non veng
    che AxGrab confronta per avvisare gli altri, ed è scritto dentro la firma.
 4. Se hai modificato il codice, caricalo anche nel repository (*Add file → Upload files*).
 
-### La firma degli aggiornamenti
-AxGrab installa un aggiornamento solo se la release contiene un `AxGrab.exe.sig` valido per quella
-versione. La firma si fa con una **chiave privata** che sta solo sul PC di chi pubblica, in
-`%USERPROFILE%\.axgrab-firma\chiave-privata.txt` (fuori dal progetto); in `app.py` c'è solo la chiave
-pubblica (`RELEASE_PUBLIC_KEY`).
-- **Non caricare mai la chiave privata** su GitHub e non mandarla a nessuno.
-- **Fanne una copia di riserva** (chiavetta USB, gestore di password). Se la perdi, le versioni già
-  installate rifiutano gli aggiornamenti automatici: bisogna crearne una nuova (`python firma.py
-  nuova-chiave`), metterla in `app.py` e chiedere a tutti di scaricare l'EXE a mano una volta.
-- Senza `.sig`, o se l'EXE allegato è stato cambiato dopo la firma, l'app mostra un errore e non
-  installa nulla.
-
 ## Licenza
 [MIT](LICENSE) © 2026 nonsonoAxel. AxGrab scarica e usa [yt-dlp](https://github.com/yt-dlp/yt-dlp)
 (Unlicense), [FFmpeg](https://ffmpeg.org) (GPL) e [Deno](https://deno.com) (MIT), che restano dei rispettivi autori.
