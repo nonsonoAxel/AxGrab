@@ -78,6 +78,7 @@ elimina quella cartella, l'EXE e i suoi collegamenti. I video scaricati non veng
 | `firma.py` | firma delle release: crea `AxGrab.exe.sig`; l'app lo controlla prima di aggiornarsi |
 | `crea-exe.bat` | ricrea `AxGrab.exe` e lo firma (serve Python 3.12) |
 | `requirements-build.txt` | versioni esatte delle librerie usate per creare l'EXE |
+| `selfcheck.py` | controllo rapido della logica senza finestra: `.venv\Scripts\python.exe selfcheck.py` |
 
 ### Pubblicare una nuova versione
 1. In `app.py` aumenta `APP_VERSION` (es. `1.0.0` → `1.0.1` per correzioni, `1.1.0` per novità).

@@ -31,7 +31,7 @@ import firma
 import trascrizione
 
 APP_NAME = "AxGrab"
-APP_VERSION = "1.1.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.2.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxGrab"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -228,6 +228,15 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
         kernel32.LocalFree(out.pbData)
 
 
+def unlink_quiet(*paths):
+    """Elimina i file indicati; uno mancante o bloccato non è un errore."""
+    for p in paths:
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def save_json(path: Path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
@@ -342,16 +351,10 @@ class Api:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         # analisi e cookie temporanei rimasti da sessioni precedenti (chiusura improvvisa, crash):
         # i file ck-*.txt possono contenere i cookie di tutto il browser, non devono restare
-        for old in [*CACHE_DIR.glob("*.json"), *CACHE_DIR.glob("ck-*.txt")]:
-            try:
-                old.unlink(missing_ok=True)
-            except OSError:
-                pass
-        try:
-            COOKIE_FILE_OLD.unlink(missing_ok=True)     # vecchia copia in chiaro
-        except OSError:
-            pass
+        unlink_quiet(*CACHE_DIR.glob("*.json"), *CACHE_DIR.glob("ck-*.txt"),
+                     COOKIE_FILE_OLD)                   # COOKIE_FILE_OLD: vecchia copia in chiaro
         self._info_cache = {}
+        self._sysinfo = None            # dati del PC (RAM, core, scheda NVIDIA), letti una volta
         self._cookie_reads = set()      # file temporanei in cui yt-dlp sta leggendo dal browser
         self._scan = []                 # modelli Whisper trovati sul PC dall'ultima ricerca
         self._last_code = None          # codice d'uscita dell'ultimo whisper-cli, per il log
@@ -408,11 +411,7 @@ class Api:
                     proc.wait(timeout=3)
             except Exception:
                 pass
-        for f in CACHE_DIR.glob("ck-*.txt"):
-            try:
-                f.unlink(missing_ok=True)
-            except OSError:
-                pass
+        unlink_quiet(*CACHE_DIR.glob("ck-*.txt"))
 
     @staticmethod
     def _fetch_text(url, limit=1_000_000):
@@ -474,7 +473,7 @@ class Api:
         if expected and trascrizione.sha256_file(zpath) != expected.lower():
             zpath.unlink(missing_ok=True)
             raise ValueError(f"{label}: il file scaricato è rovinato o non è quello pubblicato. Riprova.")
-        self._emit("setup", {"label": f"Estrazione {label}", "done": 1, "total": 1})
+        self._emit(event, {"label": f"Estrazione {label}", "done": 1, "total": 1})
         tmp = dest.with_name(dest.name + ".new")
         shutil.rmtree(tmp, ignore_errors=True)
         with zipfile.ZipFile(zpath) as z:
@@ -589,13 +588,28 @@ class Api:
         return None
 
     def paste(self):
+        """Testo negli appunti, letto direttamente da Windows (avviare PowerShell costava ~1 s)."""
+        for _ in range(10):                 # gli appunti possono essere occupati da un'altra app
+            if user32.OpenClipboard(None):
+                break
+            time.sleep(0.02)
+        else:
+            return ""
         try:
-            p = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"],
-                               capture_output=True, text=True, encoding="utf-8",
-                               errors="replace", creationflags=NO_WINDOW, timeout=10)
-            return p.stdout.strip()
+            h = user32.GetClipboardData(13)                     # CF_UNICODETEXT
+            p = kernel32.GlobalLock(h) if h else None
+            if not p:
+                return ""
+            try:
+                # lettura limitata alla dimensione del blocco: non si fida del terminatore dell'altra app
+                text = ctypes.wstring_at(p, kernel32.GlobalSize(h) // 2)
+                return text.split("\0", 1)[0].strip()
+            finally:
+                kernel32.GlobalUnlock(h)
         except Exception:
             return ""
+        finally:
+            user32.CloseClipboard()
 
     # ---------- anteprima ----------
     def _base_args(self, cookies=False, cookie_tmp=None):
@@ -697,11 +711,7 @@ class Api:
                 log.warning("cookie temporanei non eliminati subito: verranno rimossi al prossimo avvio")
 
     def forget_cookies(self):
-        for f in (COOKIE_FILE, COOKIE_FILE_OLD, COOKIE_META):
-            try:
-                f.unlink(missing_ok=True)
-            except OSError:
-                pass
+        unlink_quiet(COOKIE_FILE, COOKIE_FILE_OLD, COOKIE_META)
         return True
 
     def _cookie_spec(self):
@@ -934,24 +944,40 @@ class Api:
         opts = {**self.settings, **clean_settings(overrides)}
         info = info if isinstance(info, dict) else {}
         title, thumb, site = info.get("title"), info.get("thumbnail"), info.get("site")
-        job_id = uuid.uuid4().hex[:10]
-        job = {
-            "id": job_id, "url": url, "status": "queued", "percent": 0,
-            "title": title[:300] if isinstance(title, str) and title else url,
-            "thumbnail": thumb if valid_url(thumb) else None,
-            "site": site[:40] if isinstance(site, str) else "",
-            "mode": opts["mode"],
-            "quality": "Testo" if opts["mode"] == "text" else "JPG" if opts["mode"] == "thumb" else
-                       opts["audio_format"].upper() if opts["mode"] == "audio" else
-                       ("Max" if opts["quality"] == "best" else opts["quality"] + "p"),
-            "folder": opts["folder"], "file": None, "proc": None, "cancel": False,
-            "item": "", "speed": None, "eta": None,
-        }
-        with self._lock:
-            self._jobs[job_id] = job
-        self._emit("job", self._public(job))
+        job = self._new_job(
+            url=url, title=title[:300] if isinstance(title, str) and title else url,
+            thumbnail=thumb if valid_url(thumb) else None,
+            site=site[:40] if isinstance(site, str) else "", mode=opts["mode"],
+            quality="Testo" if opts["mode"] == "text" else "JPG" if opts["mode"] == "thumb" else
+                    opts["audio_format"].upper() if opts["mode"] == "audio" else
+                    ("Max" if opts["quality"] == "best" else opts["quality"] + "p"),
+            folder=opts["folder"])
         threading.Thread(target=self._run_job, args=(job, opts), daemon=True).start()
-        return job_id
+        return job["id"]
+
+    def _new_job(self, **fields):
+        """Nuovo lavoro in coda, già mostrato nell'interfaccia."""
+        job = {"id": uuid.uuid4().hex[:10], "url": "", "status": "queued", "percent": 0, "thumbnail": None,
+               "file": None, "proc": None, "cancel": False, "item": "", "speed": None, "eta": None, **fields}
+        with self._lock:
+            self._jobs[job["id"]] = job
+        self._emit("job", self._public(job))
+        return job
+
+    def _finish_job(self, job, ok, err):
+        """Stato finale del lavoro (annullato, completato o errore) e notifica all'interfaccia."""
+        if job["cancel"]:
+            job["status"] = "cancelled"
+        elif ok:
+            job["status"], job["percent"] = "done", 100
+            try:
+                self._add_history(job)
+            except Exception:       # il file è scaricato: la coda deve comunque mostrarlo completato
+                log.exception("cronologia non salvata")
+        else:
+            job.update(status="error", error=err)
+        job["proc"] = None
+        self._emit("job", self._public(job))
 
     def _public(self, job):
         return {k: v for k, v in job.items() if k not in ("proc",)}
@@ -997,23 +1023,18 @@ class Api:
                     out_base = Path(opts["final_folder"]) / (audio.stem or "trascrizione")
                     ok, err = self._transcribe(job, audio, out_base)
                     tried = None              # l'errore, se c'è, è già un messaggio in italiano
-                if job["cancel"]:
-                    job["status"] = "cancelled"
-                elif ok and opts["mode"] == "thumb" and not (job.get("file") and os.path.isfile(job["file"])):
-                    job.update(status="error", error="Questo contenuto non ha una miniatura da scaricare.")
-                elif ok:
-                    job["status"], job["percent"] = "done", 100
-                    self._add_history(job)
-                else:
-                    job.update(status="error", error=err if tried is None else self._friendly(err, tried),
-                               detail=err)
+                if ok and opts["mode"] == "thumb" and not (job.get("file") and os.path.isfile(job["file"])):
+                    ok, err = False, "Questo contenuto non ha una miniatura da scaricare."
+                elif not ok and not job["cancel"]:
+                    job["detail"] = err
+                    if tried is not None:
+                        err = self._friendly(err, tried)
             except Exception as e:
-                job["status"], job["error"] = "error", str(e)
+                ok, err = False, str(e)
             finally:
                 if text_dir:
                     shutil.rmtree(text_dir, ignore_errors=True)    # audio temporaneo della trascrizione
-            job["proc"] = None
-            self._emit("job", self._public(job))
+            self._finish_job(job, ok, err)
 
     # ---------- trascrizione (Whisper) ----------
     def _whisper_model_path(self):
@@ -1033,6 +1054,10 @@ class Api:
         if not src.is_file():
             return False, "Non trovo l'audio da trascrivere."
         wav = CACHE_DIR / f"tr-{job['id']}.wav"
+        # whisper-cli non sa scrivere file con emoji o caratteri non latini nel nome (es. molti
+        # titoli YouTube): scrive qui con un nome semplice, poi i file vengono spostati con il titolo vero
+        work = CACHE_DIR / f"tr-{job['id']}-testo"
+        outputs = (work.with_suffix(".txt"), work.with_suffix(".srt"))
         n = 2
         while out_base.with_suffix(".txt").exists() or out_base.with_suffix(".srt").exists():
             out_base = out_base.with_name(f"{out_base.name.rsplit(' (', 1)[0]} ({n})")   # non sovrascrive
@@ -1050,19 +1075,12 @@ class Api:
             seconds = max(1.0, (wav.stat().st_size - 44) / 32000)
             # scheda NVIDIA se attivata e scaricata; se non parte o sbaglia, si rifà sul processore
             engines = ([("gpu", WHISPER_GPU_EXE)] if self._gpu_ready() else []) + [("cpu", WHISPER_EXE)]
-            # whisper-cli non sa scrivere file con emoji o caratteri non latini nel nome (es. molti
-            # titoli YouTube): scrive in una cartella temporanea con un nome semplice, poi i file
-            # vengono spostati con il titolo vero
-            work = CACHE_DIR / f"tr-{job['id']}-testo"
             txt = out_base.with_suffix(".txt")
             for i, (kind, exe) in enumerate(engines):
-                for f in (work.with_suffix(".txt"), work.with_suffix(".srt")):
-                    f.unlink(missing_ok=True)
+                unlink_quiet(*outputs)
                 ok, used_gpu, tail, secs = self._run_whisper(job, exe, model, wav, work, kind == "gpu")
                 if job["cancel"]:
-                    for f in (work.with_suffix(".txt"), work.with_suffix(".srt")):
-                        f.unlink(missing_ok=True)
-                    return False, "Annullato"
+                    return False, "Annullato"           # i file parziali li toglie il finally
                 if ok:
                     for ext in (".txt", ".srt"):
                         if work.with_suffix(ext).is_file():
@@ -1083,9 +1101,7 @@ class Api:
                                       "la faccio con il processore.")
             return False, "La trascrizione non è riuscita. Riprova, o prova un modello diverso."
         finally:
-            wav.unlink(missing_ok=True)
-            for f in (CACHE_DIR / f"tr-{job['id']}-testo.txt", CACHE_DIR / f"tr-{job['id']}-testo.srt"):
-                f.unlink(missing_ok=True)
+            unlink_quiet(wav, *outputs)
 
     def _run_whisper(self, job, exe, model, wav, out_base, gpu):
         """Una esecuzione di whisper-cli. Restituisce (ok, GPU usata davvero, ultime righe, secondi)."""
@@ -1131,36 +1147,26 @@ class Api:
             "Audio e video (*.mp3;*.m4a;*.wav;*.mp4;*.mkv;*.webm;*.mov;*.ogg;*.opus;*.flac;*.aac)",))
         if not res:
             return {"ok": False}
-        src = Path(res[0] if isinstance(res, (list, tuple)) else res)
-        job_id = uuid.uuid4().hex[:10]
-        job = {"id": job_id, "url": "", "status": "queued", "percent": 0, "title": src.name[:300],
-               "thumbnail": None, "site": "File", "mode": "text", "quality": "Testo",
-               "folder": str(src.parent), "file": None, "proc": None, "cancel": False,
-               "item": "", "speed": None, "eta": None}
-        with self._lock:
-            self._jobs[job_id] = job
-        self._emit("job", self._public(job))
+        self._transcribe_local(Path(res[0] if isinstance(res, (list, tuple)) else res))
+        return {"ok": True}
+
+    def _transcribe_local(self, src: Path):
+        """Mette in coda la trascrizione di un file del PC; "source" permette di riprovarla."""
+        job = self._new_job(title=src.name[:300], site="File", mode="text", quality="Testo",
+                            folder=str(src.parent), source=str(src))
 
         def work():
             with self._slots:
                 try:
                     ok, err = self._transcribe(job, src, src.with_suffix(""))
-                    if job["cancel"]:
-                        job["status"] = "cancelled"
-                    elif ok:
-                        job["status"], job["percent"] = "done", 100
-                        self._add_history(job)
-                    else:
-                        job.update(status="error", error=err)
                 except Exception as e:
-                    job.update(status="error", error=str(e))
-                job["proc"] = None
-                self._emit("job", self._public(job))
+                    ok, err = False, str(e)
+                self._finish_job(job, ok, err)
         threading.Thread(target=work, daemon=True).start()
-        return {"ok": True}
+        return job["id"]
 
     def _system(self):
-        if getattr(self, "_sysinfo", None) is None:
+        if self._sysinfo is None:
             self._sysinfo = self._read_system()
         return self._sysinfo
 
@@ -1230,7 +1236,7 @@ class Api:
             return base if gpu and base in trascrizione.GPU_DLLS else None
         self._install_zip(url, "accelerazione NVIDIA" if gpu else "motore di trascrizione",
                           WHISPER_GPU_DIR if gpu else WHISPER_DIR, keep, expected_sha=asset["digest"][7:],
-                          event="model" if gpu else "setup")
+                          event="model")       # avanzamento sulla scheda del modello, non nell'avvio
 
     def whisper_gpu(self, enable):
         """Attiva o disattiva la scheda NVIDIA; la prima volta scarica il motore CUDA (653 MB)."""
@@ -1306,7 +1312,7 @@ class Api:
     def whisper_import(self, path):
         """Usa un modello trovato sul PC: solo se la ricerca l'ha riconosciuto come ufficiale e integro.
         Se possibile è un collegamento al file (nessuno spazio in più), altrimenti una copia."""
-        item = next((s for s in getattr(self, "_scan", []) if s["path"] == path and s["status"] == "ok"), None)
+        item = next((s for s in self._scan if s["path"] == path and s["status"] == "ok"), None)
         if not item:
             return {"ok": False, "error": "Questo file non è utilizzabile."}
         MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -1418,6 +1424,8 @@ class Api:
         job = self._jobs.pop(job_id, None)
         if not job:
             return None
+        if job.get("source"):               # file del PC: si ritrascrive lo stesso file
+            return self._transcribe_local(Path(job["source"]))
         return self.start_download(job["url"], {"title": job["title"], "thumbnail": job["thumbnail"],
                                                 "site": job["site"]})
 
@@ -1432,9 +1440,9 @@ class Api:
         entry = {"title": job["title"], "url": job["url"], "thumbnail": job["thumbnail"],
                  "site": job["site"], "file": job["file"], "folder": job["folder"],
                  "mode": job["mode"], "quality": job["quality"], "date": time.strftime("%Y-%m-%d %H:%M")}
-        self.history.insert(0, entry)
-        self.history = self.history[:300]
-        save_json(HISTORY_FILE, self.history)
+        with self._lock:        # due download che finiscono insieme non devono scrivere il file in contemporanea
+            self.history = [entry, *self.history][:300]
+            save_json(HISTORY_FILE, self.history)
         self._emit("history", self.history)
 
     def get_history(self):
@@ -1449,11 +1457,7 @@ class Api:
             if _log_handler.stream:
                 _log_handler.stream.close()
                 _log_handler.stream = None
-            for f in (LOG_FILE, LOG_FILE.with_name(LOG_FILE.name + ".1")):
-                try:
-                    f.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            unlink_quiet(LOG_FILE, LOG_FILE.with_name(LOG_FILE.name + ".1"))
         finally:
             _log_handler.release()
         return True
@@ -1816,6 +1820,15 @@ user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
 user32.ShowWindow.argtypes = [wt.HWND, ctypes.c_int]
 user32.MonitorFromWindow.argtypes = [wt.HWND, wt.DWORD]
 user32.MonitorFromWindow.restype = wt.HMONITOR
+user32.OpenClipboard.argtypes = [wt.HWND]
+user32.GetClipboardData.argtypes = [wt.UINT]
+user32.GetClipboardData.restype = wt.HANDLE
+kernel32 = ctypes.windll.kernel32
+kernel32.GlobalLock.argtypes = [wt.HGLOBAL]
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = [wt.HGLOBAL]
+kernel32.GlobalSize.argtypes = [wt.HGLOBAL]
+kernel32.GlobalSize.restype = ctypes.c_size_t
 MIN_SIZE = (880, 600)
 
 
