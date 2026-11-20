@@ -31,7 +31,7 @@ import firma
 import trascrizione
 
 APP_NAME = "AxGrab"
-APP_VERSION = "1.2.0"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
+APP_VERSION = "1.2.1"           # da aumentare a ogni nuova release su GitHub (es. 1.0.1, 1.1.0)
 GITHUB_REPO = "nonsonoAxel/AxGrab"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
@@ -229,7 +229,6 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
 
 
 def unlink_quiet(*paths):
-    """Elimina i file indicati; uno mancante o bloccato non è un errore."""
     for p in paths:
         try:
             p.unlink(missing_ok=True)
@@ -351,10 +350,9 @@ class Api:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
         # analisi e cookie temporanei rimasti da sessioni precedenti (chiusura improvvisa, crash):
         # i file ck-*.txt possono contenere i cookie di tutto il browser, non devono restare
-        unlink_quiet(*CACHE_DIR.glob("*.json"), *CACHE_DIR.glob("ck-*.txt"),
-                     COOKIE_FILE_OLD)                   # COOKIE_FILE_OLD: vecchia copia in chiaro
+        unlink_quiet(*CACHE_DIR.glob("*.json"), *CACHE_DIR.glob("ck-*.txt"), COOKIE_FILE_OLD)
         self._info_cache = {}
-        self._sysinfo = None            # dati del PC (RAM, core, scheda NVIDIA), letti una volta
+        self._sysinfo = None
         self._cookie_reads = set()      # file temporanei in cui yt-dlp sta leggendo dal browser
         self._scan = []                 # modelli Whisper trovati sul PC dall'ultima ricerca
         self._last_code = None          # codice d'uscita dell'ultimo whisper-cli, per il log
@@ -588,7 +586,6 @@ class Api:
         return None
 
     def paste(self):
-        """Testo negli appunti, letto direttamente da Windows (avviare PowerShell costava ~1 s)."""
         for _ in range(10):                 # gli appunti possono essere occupati da un'altra app
             if user32.OpenClipboard(None):
                 break
@@ -956,7 +953,6 @@ class Api:
         return job["id"]
 
     def _new_job(self, **fields):
-        """Nuovo lavoro in coda, già mostrato nell'interfaccia."""
         job = {"id": uuid.uuid4().hex[:10], "url": "", "status": "queued", "percent": 0, "thumbnail": None,
                "file": None, "proc": None, "cancel": False, "item": "", "speed": None, "eta": None, **fields}
         with self._lock:
@@ -965,7 +961,6 @@ class Api:
         return job
 
     def _finish_job(self, job, ok, err):
-        """Stato finale del lavoro (annullato, completato o errore) e notifica all'interfaccia."""
         if job["cancel"]:
             job["status"] = "cancelled"
         elif ok:
@@ -1080,7 +1075,7 @@ class Api:
                 unlink_quiet(*outputs)
                 ok, used_gpu, tail, secs = self._run_whisper(job, exe, model, wav, work, kind == "gpu")
                 if job["cancel"]:
-                    return False, "Annullato"           # i file parziali li toglie il finally
+                    return False, "Annullato"
                 if ok:
                     for ext in (".txt", ".srt"):
                         if work.with_suffix(ext).is_file():
@@ -1151,7 +1146,6 @@ class Api:
         return {"ok": True}
 
     def _transcribe_local(self, src: Path):
-        """Mette in coda la trascrizione di un file del PC; "source" permette di riprovarla."""
         job = self._new_job(title=src.name[:300], site="File", mode="text", quality="Testo",
                             folder=str(src.parent), source=str(src))
 
@@ -1236,7 +1230,7 @@ class Api:
             return base if gpu and base in trascrizione.GPU_DLLS else None
         self._install_zip(url, "accelerazione NVIDIA" if gpu else "motore di trascrizione",
                           WHISPER_GPU_DIR if gpu else WHISPER_DIR, keep, expected_sha=asset["digest"][7:],
-                          event="model")       # avanzamento sulla scheda del modello, non nell'avvio
+                          event="model")
 
     def whisper_gpu(self, enable):
         """Attiva o disattiva la scheda NVIDIA; la prima volta scarica il motore CUDA (653 MB)."""
@@ -1424,7 +1418,7 @@ class Api:
         job = self._jobs.pop(job_id, None)
         if not job:
             return None
-        if job.get("source"):               # file del PC: si ritrascrive lo stesso file
+        if job.get("source"):
             return self._transcribe_local(Path(job["source"]))
         return self.start_download(job["url"], {"title": job["title"], "thumbnail": job["thumbnail"],
                                                 "site": job["site"]})

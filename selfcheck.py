@@ -1,11 +1,8 @@
-"""
-Self-check della logica non grafica di AxGrab (nessuna finestra, nessun download).
-Uso:  .venv\\Scripts\\python.exe selfcheck.py
-I dati vanno in una cartella temporanea, non in quella vera di AxGrab.
-"""
+"""Controllo della logica senza finestra né download: usa una cartella dati temporanea, non quella vera."""
 import os
 import sys
 import tempfile
+import threading
 import time
 
 tmp = tempfile.mkdtemp(prefix="axgrab-check-")
@@ -13,12 +10,11 @@ os.environ["LOCALAPPDATA"] = tmp
 os.environ["APPDATA"] = tmp
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import app      # noqa: E402
-import firma    # noqa: E402
+import app
+import firma
 
 assert str(app.DATA_DIR).startswith(tmp)
 
-# impostazioni: solo chiavi note e valori ammessi
 assert app.clean_settings({"mode": "audio", "parallel": 3.0, "quality": "999", "x": 1, "playlist": "si",
                            "folder": "relativa", "skip_version": "1.2.3"}) == \
     {"mode": "audio", "parallel": 3, "skip_version": "1.2.3"}
@@ -36,7 +32,6 @@ assert app.Api._keep_ytdlp("README.md") is None
 assert app.Api._keep_ffmpeg("ff/bin/ffprobe.exe") == "ffprobe.exe"
 assert app.Api._keep_ffmpeg("ff/doc/ffmpeg.exe") is None
 
-# firma: valida, manomessa, versione sbagliata
 secret = bytes(range(32))
 pub = firma.public_key(secret).hex()
 sig = firma.make_signature_file(secret, "1.2.0", "a" * 64, 123)
@@ -48,14 +43,12 @@ for text, version in ((sig.replace('"size": 123', '"size": 124'), "1.2.0"), (sig
     except ValueError:
         pass
 
-# helper per cancellare: file mancanti non sono un errore
 f = app.CACHE_DIR / "prova.txt"
 f.parent.mkdir(parents=True, exist_ok=True)
 f.write_text("x")
 app.unlink_quiet(f, app.CACHE_DIR / "manca.txt")
 assert not f.exists()
 
-# lavori: creazione, chiusura, cronologia, riprova
 api = app.Api()
 events = []
 api._emit = lambda ev, data: events.append((ev, dict(data) if isinstance(data, dict) else data))
@@ -75,32 +68,27 @@ api._finish_job(canc, True, "")
 assert canc["status"] == "cancelled"
 new_id = api.retry(err["id"])
 assert new_id and err["id"] not in api._jobs and new_id in api._jobs
-deadline = time.time() + 10                     # yt-dlp non è installato qui: deve finire in errore
+deadline = time.time() + 10
 while api._jobs[new_id]["status"] in ("queued", "downloading") and time.time() < deadline:
     time.sleep(0.05)
 assert api._jobs[new_id]["status"] == "error", api._jobs[new_id]
 
-# lavori che finiscono insieme: tutti in cronologia, tutti notificati come completati
-import threading     # noqa: E402
 n0, many = len(api.history), [api._new_job(title=f"j{i}", site="Web", mode="video", quality="720p", folder=tmp)
-                     for i in range(20)]
+                              for i in range(20)]
 events.clear()
 ts = [threading.Thread(target=api._finish_job, args=(j, True, "")) for j in many]
 [t.start() for t in ts]
 [t.join() for t in ts]
 assert len(api.history) == n0 + 20, len(api.history)
 assert sum(1 for ev, d in events if ev == "job" and d["status"] == "done") == 20
-# se la cronologia non si salva, il lavoro risulta comunque completato
 orig, api._add_history = api._add_history, lambda job: 1 / 0
 broken = api._new_job(title="x", folder=tmp)
 api._finish_job(broken, True, "")
 api._add_history = orig
 assert broken["status"] == "done" and events[-1][1]["status"] == "done"
 
-# appunti: solo lettura, senza toccare quello che l'utente ha copiato
 assert isinstance(api.paste(), str)
 
-# riprova di una trascrizione da file: riparte sullo stesso file (che qui non esiste: finisce in errore)
 src = os.path.join(tmp, "manca.mp3")
 fid = api._transcribe_local(app.Path(src))
 time.sleep(0.3)
